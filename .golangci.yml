@@ -1,0 +1,74 @@
+# Copyright (C) 2025 CISPA Helmholtz Center for Information Security
+# Author: Kevin Morio <kevin.morio@cispa.de>
+#
+# This file is part of SpecMon.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with program. If not, see <https://www.gnu.org/licenses/>.
+
+run:
+  timeout: 10m
+linters:
+  enable-all: false
+  disable-all: true
+  enable:
+    - errcheck
+    - errorlint
+    - gocritic
+    - gofumpt
+    - goimports
+    - gomodguard
+    - revive
+    - gosimple
+    - govet
+    - gosec
+    - godot
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - nolintlint
+    - staticcheck
+    - testifylint
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+linters-settings:
+  gocyclo:
+    min-complexity: 75
+  lll:
+    line-length: 200
+  ireturn:
+    allow:
+      - error
+      - generic
+      - Term
+  mnd:
+    ignored-numbers:
+      - '0'
+      - '1'
+      - '2'
+  gocritic:
+    disabled-checks:
+      - captLocal 
+      - unslice
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - lll
+    - path: binding.go
+      linters:
+        - gocritic

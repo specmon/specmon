@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "SpecMon: Modular Black-Box Runtime Monitoring of Security Protocols"
+authors:
+  - family-names: "Morio"
+    given-names: "Kevin"
+  - family-names: "K\u00fcnnemann"
+    given-names: "Robert"
+abstract: "This work addresses the verification gap between formal protocol specifications and their real-world implementations by monitoring compliance with formal specifications. We achieve this by instrumenting the networking and cryptographic libraries used by applications to generate event streams, even without access to the source code. An efficient algorithm is then employed to match these event streams against valid traces defined in the formal specification. Unlike previous approaches, our algorithm is capable of handling non-determinism, allowing it to support multiple concurrent sessions. Furthermore, our method introduces minimal overhead, as demonstrated through experiments on the WireGuard userspace implementation and a case study based on prior work. Notably, we find that the reference Tamarin model for WireGuard requires only minor adjustments, such as defining wire formats and correcting small inaccuracies uncovered during our case study. Finally, we provide formal proofs of soundness and completeness for our algorithm, ensuring that it accepts only valid event streams according to the specification and guarantees that all such valid streams are recognized."
+date-released: "2024-01-01"
+version: "1.0.0"
+keywords:
+  - formal verification
+  - runtime monitoring
+  - security protocols
+identifiers:
+  - type: doi
+    value: "10.1145/3658644.3690197"
+  - type: isbn
+    value: "9798400706363"
+references:
+  - type: conference-paper
+    title: "SpecMon: Modular Black-Box Runtime Monitoring of Security Protocols"
+    authors:
+      - family-names: "Morio"
+        given-names: "Kevin"
+      - family-names: "K\u00fcnnemann"
+        given-names: "Robert"
+    venue: "Proceedings of the 2024 on ACM SIGSAC Conference on Computer and Communications Security"
+    pages: "2741-2755"
+    numpages: 15
+    year: 2024
+    publisher: "Association for Computing Machinery"
+    location: "Salt Lake City, UT, USA"
+    series: "CCS '24"
+    address: "New York, NY, USA"
+    url: "https://doi.org/10.1145/3658644.3690197"
+    doi: "10.1145/3658644.3690197"
