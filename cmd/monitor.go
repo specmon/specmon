@@ -39,7 +39,7 @@ type MonitorConfig struct {
 }
 
 // RunE runs the monitor subcommand.
-func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
+func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	quiet, _ := cmd.Root().Flags().GetBool("quiet")
 	pid, err := cmd.Root().Flags().GetInt("pid")
 	if err != nil {
