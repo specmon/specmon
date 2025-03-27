@@ -674,7 +674,10 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
 					for _, f := range c.facts {
-						log.Warnf("  %s\n", f.Name)
+						argsJoined := strings.Join(utils.Map(f.Args, func(arg term.Term) string {
+							return arg.String()
+						}), ", ")
+						log.Warnf("  %s(%s)\n", f.Name, argsJoined)
 					}
 				}
 
@@ -708,7 +711,10 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 		for _, c := range m.configs.Values() {
 			for _, f := range c.facts {
-				log.Warnf("  %s\n", f.Name)
+				argsJoined := strings.Join(utils.Map(f.Args, func(arg term.Term) string {
+					return arg.String()
+				}), ", ")
+				log.Warnf("  %s(%s)\n", f.Name, argsJoined)
 			}
 		}
 	}()
