@@ -225,7 +225,7 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 		newFact := NewFact(fact.Name, slices.Clone(fact.Args), fact.Type)
 		for j := range newFact.Args {
 			b.Iterate(func(k, v term.Term) bool {
-				newFact.Args[j] = term.UnifyReplace(newFact.Args[j], k, v)
+				newFact.Args[j] = term.UnifyReplaceRecursive(newFact.Args[j], k, v)
 
 				return true
 			})
