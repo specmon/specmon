@@ -46,7 +46,9 @@ func BuildDAGForRule(r *Rule) *TermNode {
 	// 2. LHS defines all variables in Act and RHS
 	root := data.NewDAGNode[term.Term, term.Term](nil)
 
-	for _, fact := range r.RHS {
+	combinedFacts := append(r.RHS, r.Act...)
+
+	for _, fact := range combinedFacts {
 		for _, arg := range fact.Args {
 			argNode := FindTerm(root, arg)
 
@@ -173,6 +175,31 @@ func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding)
 		}
 	}
 
+	// Replace functions in r.Act with variables.
+	for i := range r.Act {
+		for j := range r.Act[i].Args {
+			r.Act[i].Args[j] = term.FindReplaceBy(r.Act[i].Args[j], func(t term.Term) bool {
+				f, err := term.AsFunction(t)
+				if err != nil {
+					return false
+				}
+
+				_, ok := F.Get(f)
+
+				return ok
+			}, func(t term.Term) term.Term {
+				f := term.Must(term.AsFunction(t))
+				v, ok := F.Get(f)
+
+				if ok {
+					return v
+				}
+
+				return t
+			})
+		}
+	}
+
 	return &Rule{
 		Name:  EndRuleSuffix,
 		LHS:   lhs,
@@ -232,8 +259,10 @@ func ReplaceSubterms(n *TermNode, b *term.Binding) {
 }
 
 func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
+	combinedFacts := append(r.RHS, r.Act...)
+
 	// If the RHS of r does not contain any functions, there is nothing to do.
-	if !Facts(r.RHS).HasFunctions() {
+	if !Facts(combinedFacts).HasFunctions() {
 		return []*Rule{r}
 	}
 
