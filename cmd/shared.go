@@ -98,3 +98,13 @@ func getEventSource(file string) (*os.File, error) {
 
 	return os.Open(file)
 }
+
+// getOutputFile returns the output file.
+// If the file is empty or "-", it returns os.Stdout.
+func getOutputFile(file string) (*os.File, error) {
+	if file == "" || file == "-" {
+		return os.Stdout, nil
+	}
+
+	return os.Create(file)
+}
