@@ -96,7 +96,7 @@ Use "specmon [command] --help" for more information about a command.
    ```
 ---
 
-## Contributing
+## 🤝 Contributing
 
 Any contributions you make are **greatly appreciated**.
 
