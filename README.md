@@ -94,6 +94,13 @@ Flags:
 
 Use "specmon [command] --help" for more information about a command.
    ```
+---
+
+## 🤝 Contributing
+
+Any contributions you make are **greatly appreciated**.
+
+For details on how to get started, please see our [Contributing Guidelines](.github/CONTRIBUTING.md).
 
 ---
 
