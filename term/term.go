@@ -762,6 +762,23 @@ func UnifyReplace(t, g, h Term) Term {
 	return u
 }
 
+func UnifyReplaceRecursive(t, g, h Term) Term {
+	current := t
+
+	// Keep applying replacements until no more changes occur
+	for {
+		previous := current
+		current = UnifyReplace(current, g, h)
+
+		// If no changes occurred, we're done
+		if current.Equal(previous) {
+			break
+		}
+	}
+
+	return current
+}
+
 // Find a (sub)term g of t such that p(g) holds and replace it with r(g) in t.
 // Note: t == g is allowed.
 func FindReplaceBy(t Term, p func(Term) bool, r func(Term) Term) Term {
