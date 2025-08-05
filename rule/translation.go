@@ -46,7 +46,9 @@ func BuildDAGForRule(r *Rule) *TermNode {
 	// 2. LHS defines all variables in Act and RHS
 	root := data.NewDAGNode[term.Term, term.Term](nil)
 
-	combinedFacts := append(r.RHS, r.Act...)
+	combinedFacts := make([]*Fact, 0, len(r.RHS)+len(r.Act))
+	combinedFacts = append(combinedFacts, r.RHS...)
+	combinedFacts = append(combinedFacts, r.Act...)
 
 	for _, fact := range combinedFacts {
 		for _, arg := range fact.Args {
@@ -259,7 +261,9 @@ func ReplaceSubterms(n *TermNode, b *term.Binding) {
 }
 
 func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
-	combinedFacts := append(r.RHS, r.Act...)
+	combinedFacts := make([]*Fact, 0, len(r.RHS)+len(r.Act))
+	combinedFacts = append(combinedFacts, r.RHS...)
+	combinedFacts = append(combinedFacts, r.Act...)
 
 	// If the RHS of r does not contain any functions, there is nothing to do.
 	if !Facts(combinedFacts).HasFunctions() {
