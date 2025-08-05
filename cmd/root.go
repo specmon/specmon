@@ -209,6 +209,7 @@ func Root() *cobra.Command {
 	rootCmd := NewRootCmd()
 	rootCmd.AddCommand(
 		NewMonitorCmd(),
+		NewRewriteCmd(),
 	)
 
 	return rootCmd
