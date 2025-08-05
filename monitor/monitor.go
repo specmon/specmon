@@ -563,7 +563,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 						for _, f := range p {
 							if r := getRewriteTerm(f); r != nil {
 								fr := term.Must(term.AsFunction(r))
-								out <- &TimedEvent{Time: /* event.Time */ time.Now().UnixNano(), Event: fr}
+								out <- &TimedEvent{Time: event.Time, Event: fr}
 							}
 						}
 					default:
