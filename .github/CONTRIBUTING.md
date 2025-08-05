@@ -48,11 +48,11 @@ This provides all dependencies and tools automatically.
    - Follow [Effective Go](https://golang.org/doc/effective_go.html) conventions
    - Include tests for any new functionality or bug fixes.
 
-3. Commit using [Conventional Commits](https://conventionalcommits.org/):
+3. Commit using [Conventional Commits](https://conventionalcommits.org):
    ```bash
    git commit -m "feat(parser): Add new capability"
    git commit -m "fix(monitor): Resolve issue with X"
-   git commit -m "chore: update Dependencies"
+   git commit -m "chore: Update Dependencies"
    ```
 
 4. Push to your fork and create a pull request against `develop`
