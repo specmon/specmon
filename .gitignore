@@ -1,3 +1,6 @@
 specmon
 tests/
 tags
+
+.direnv
+.envrc
