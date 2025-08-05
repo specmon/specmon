@@ -36,21 +36,24 @@ import (
 )
 
 const (
-	ConstantType     = "constant"
-	VariableType     = "variable"
-	FunctionType     = "function"
-	PairFunctionName = "pair"
-	ExpFunctionName  = "exp"
-	AndFunctionName  = "and"
-	OrFunctionName   = "or"
-	AddFunctionName  = "add"
-	BinaryArity      = 2
+	ConstantType      = "constant"
+	VariableType      = "variable"
+	FunctionType      = "function"
+	PairFunctionName  = "pair"
+	SliceFunctionName = "slice"
+	ExpFunctionName   = "exp"
+	AndFunctionName   = "and"
+	OrFunctionName    = "or"
+	AddFunctionName   = "add"
+	BinaryArity       = 2
+	TernaryArity      = 3
 
 	PublicPrefix = "$"
 )
 
 var ReservedNames = data.NewSet[string](
 	PairFunctionName,
+	SliceFunctionName,
 	CatFunctionName,
 	AddFunctionName,
 	AndFunctionName,
@@ -77,8 +80,9 @@ var (
 
 	ErrInvalidFormatFunction = errors.New("invalid format: expected byte(), string(), int()")
 
-	ErrBinaryArity = errors.New("expecte arity 2")
-	ErrInvalidType = errors.New("invalid type for arithmetic function")
+	ErrBinaryArity  = errors.New("expecte arity 2")
+	ErrTernaryArity = errors.New("expected arity 3")
+	ErrInvalidType  = errors.New("invalid type for arithmetic function")
 )
 
 type Term interface {
@@ -872,6 +876,8 @@ func Evaluate(t Term) (Term, error) {
 		return handleCatFunction(f, newArgs, modified)
 	case AddFunctionName, AndFunctionName, OrFunctionName:
 		return handleArithmeticFunction(f, newArgs, modified)
+	case SliceFunctionName:
+		return handleSliceFunction(f, newArgs, modified)
 	default:
 		if !modified {
 			return t, nil
@@ -983,6 +989,74 @@ func handleArithmeticFunction(f *Function, args []Term, modified bool) (Term, er
 	default:
 		return nil, ErrInvalidType
 	}
+}
+
+func handleSliceFunction(f *Function, args []Term, modified bool) (Term, error) {
+	if len(args) != TernaryArity {
+		return nil, ErrTernaryArity
+	}
+
+	data, err := AsBytes(args[0])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	start, err := AsInt(args[1])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	end, err := AsInt(args[2])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	dataLen := len(data)
+
+	// Resolve start index
+	resolvedStart := start
+	if resolvedStart < 0 {
+		resolvedStart = dataLen + resolvedStart
+	}
+
+	// Resolve end index
+	resolvedEnd := end
+	if end == 0 { // Special case: 0 means "until the end"
+		resolvedEnd = dataLen
+	} else if end < 0 {
+		resolvedEnd = dataLen + end
+	}
+
+	// Clamp indices to the bounds of the data slice
+	if resolvedStart < 0 {
+		resolvedStart = 0
+	}
+	if resolvedStart > dataLen {
+		resolvedStart = dataLen
+	}
+
+	if resolvedEnd < 0 {
+		resolvedEnd = 0
+	}
+	if resolvedEnd > dataLen {
+		resolvedEnd = dataLen
+	}
+
+	// If start is after end, return an empty slice
+	if resolvedStart >= resolvedEnd {
+		return NewConstant[[]byte]([]byte{}), nil
+	}
+
+	return NewConstant[[]byte](data[resolvedStart:resolvedEnd]), nil
 }
 
 type Terms []Term
