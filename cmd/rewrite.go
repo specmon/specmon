@@ -38,7 +38,9 @@ type RewriteConfig struct {
 }
 
 // RunE runs the rewrite subcommand.
-func (r RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
+func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
+	// quiet, _ := cmd.Root().Flags().GetBool("quiet")
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM)
 
