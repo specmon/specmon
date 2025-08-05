@@ -371,7 +371,6 @@ func (p *Parser) parseRuleAttributes(node *sitter.Node) map[string]rule.Attribut
 			var attrValue string
 			if ruleAttr.ChildCount() > 2 {
 				attrValue = ruleAttr.Child(2).Content(p.src)
-				fmt.Println(attrValue)
 			}
 			attrs[attrKey] = rule.StringAttribute{Value: attrValue}
 		}
