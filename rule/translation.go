@@ -530,7 +530,7 @@ func nameForTerm(t term.Term) string {
 
 func nonPublicRuleVars(r *Rule) []term.Term {
 	var nonPublicRuleVars []*term.Variable
-	ruleVars := utils.Unique(Facts(r.RHS).Vars())
+	ruleVars := utils.Unique(Facts(r.LHS).Vars())
 
 	for _, v := range ruleVars {
 		if !v.IsPublic() {
