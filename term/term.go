@@ -41,6 +41,7 @@ const (
 	FunctionType      = "function"
 	PairFunctionName  = "pair"
 	SliceFunctionName = "slice"
+	ReverseFuncName   = "reverse"
 	ExpFunctionName   = "exp"
 	AndFunctionName   = "and"
 	OrFunctionName    = "or"
@@ -80,7 +81,8 @@ var (
 
 	ErrInvalidFormatFunction = errors.New("invalid format: expected byte(), string(), int()")
 
-	ErrBinaryArity  = errors.New("expecte arity 2")
+	ErrUnaryArity   = errors.New("expected arity 1")
+	ErrBinaryArity  = errors.New("expected arity 2")
 	ErrTernaryArity = errors.New("expected arity 3")
 	ErrInvalidType  = errors.New("invalid type for arithmetic function")
 )
@@ -878,6 +880,8 @@ func Evaluate(t Term) (Term, error) {
 		return handleArithmeticFunction(f, newArgs, modified)
 	case SliceFunctionName:
 		return handleSliceFunction(f, newArgs, modified)
+	case ReverseFuncName:
+		return handleReverseFunction(f, newArgs, modified)
 	default:
 		if !modified {
 			return t, nil
@@ -1057,6 +1061,48 @@ func handleSliceFunction(f *Function, args []Term, modified bool) (Term, error) 
 	}
 
 	return NewConstant[[]byte](data[resolvedStart:resolvedEnd]), nil
+}
+
+func handleReverseFunction(f *Function, args []Term, modified bool) (Term, error) {
+	if len(args) != 1 {
+		return nil, ErrUnaryArity
+	}
+
+	arg := args[0]
+
+	originalBytes, err := AsBytes(arg)
+	if err != nil {
+		// If the argument cannot be converted to bytes (e.g., it's a variable),
+		// return the function call, possibly with an evaluated argument.
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	// Slices.Reverse is in-place, so we must copy the data first
+	// to avoid modifying the original constant's value.
+	reversedBytes := make([]byte, len(originalBytes))
+	copy(reversedBytes, originalBytes)
+	slices.Reverse(reversedBytes)
+
+	// Preserve the original constant type.
+	switch arg.(type) {
+	case *Constant[int]:
+		// The size of the byte slice is preserved, so this conversion is safe.
+		newValue, _ := utils.BytesToInt(reversedBytes, internalByteOrder())
+		return NewConstant[int](newValue), nil
+	case *Constant[string]:
+		return NewConstant[string](string(reversedBytes)), nil
+	case *Constant[[]byte]:
+		return NewConstant[[]byte](reversedBytes), nil
+	default:
+		// This case should not be reached if AsBytes succeeds, but as a fallback.
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
 }
 
 type Terms []Term
