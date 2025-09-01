@@ -64,9 +64,10 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	role, _ := cmd.Root().Flags().GetString("role")
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
+	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 
 	// Parse main monitoring rules
-	_, _, decompRules, err := ProcessRules(specPath, role, decompose)
+	_, _, decompRules, err := ProcessRules(specPath, role, decompose, defines)
 	if err != nil {
 		return err
 	}
