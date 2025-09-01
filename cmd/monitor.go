@@ -32,7 +32,7 @@ import (
 
 // MonitorConfig is the configuration for the monitor subcommand.
 type MonitorConfig struct {
-	In       string `flag:"in"   short:"i" desc:"input path"`
+	In       string `flag:"in"   short:"i" desc:"input path (file, '-', host:port)"`
 	Out      string `flag:"out"  short:"o" desc:"output path"`
 	PreTrace string `flag:"pre-trace" short:"p" desc:"pre-trace path"`
 	Pid      int    `flag:"pid"  short:"P" desc:"PID of the monitored process to terminate"`
@@ -65,43 +65,35 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	role, _ := cmd.Root().Flags().GetString("role")
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
 
+	// Parse main monitoring rules
 	_, _, decompRules, err := ProcessRules(specPath, role, decompose)
 	if err != nil {
 		return err
 	}
 
-	eventSource, err := getEventSource(r.In)
+	// Open input
+	eventSource, err := openInputReader(r.In)
 	if err != nil {
-		return fmt.Errorf("cannot open in file: %w", err)
+		return fmt.Errorf("cannot open input: %w", err)
 	}
 	defer eventSource.Close()
 
 	source := io.Reader(eventSource)
-
 	if r.PreTrace != "" {
 		preTrace, err := os.Open(r.PreTrace)
 		if err != nil {
 			return fmt.Errorf("cannot open pre-trace file: %w", err)
 		}
 		defer preTrace.Close()
-
 		source = io.MultiReader(preTrace, eventSource)
 	}
 
-	// events, errs := monitor.ReadEvents(source)
-
-	// go func() {
-	// 	for err := range errs {
-	// 		log.Fatal(err)
-	// 	}
-	// }()
-
+	// Create the main monitor
 	m, err = monitor.NewMonitor(decompRules)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
 
-	// _, consumed := m.ProcessEvents(events, false)
 	_, consumed := m.ProcessEventsFromReader(source, false, pid)
 
 	count := 1

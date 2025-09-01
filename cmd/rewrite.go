@@ -32,7 +32,7 @@ import (
 // RewriteConfig is a configuration of the rewrite subcommand.
 type RewriteConfig struct {
 	JSON bool   `flag:"json" short:"j" desc:"output in json format"`
-	In   string `flag:"in"   short:"i" desc:"input path"`
+	In   string `flag:"in"   short:"i" desc:"input path (file, '-', host:port)"`
 	Out  string `flag:"out"  short:"o" desc:"output path"`
 	Pid  int    `flag:"pid"  short:"P" desc:"PID of the monitored process to terminate"`
 }
@@ -63,34 +63,18 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot process rules: %w", err)
 	}
 
-	eventSource, err := getEventSource(r.In)
+	eventSource, err := openInputReader(r.In)
 	if err != nil {
-		return fmt.Errorf("cannot open in file: %w", err)
+		return fmt.Errorf("cannot open input: %w", err)
 	}
 	defer eventSource.Close()
-
-	// events, errs := monitor.ReadEvents(eventSource)
-
-	// go func() {
-	// 	for err := range errs {
-	// 		log.Fatal(err)
-	// 	}
-	// }()
 
 	m, err = monitor.NewMonitor(decompRules)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
 
-	// Stats are not reported in the rewrite subcommand.
-	// outs, consumed := m.ProcessEvents(events, true)
 	outs, _ := m.ProcessEventsFromReader(eventSource, true, -1)
-
-	// go func() {
-	// 	for range consumed {
-	// 		continue
-	// 	}
-	// }()
 
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {
