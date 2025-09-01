@@ -38,8 +38,8 @@ import (
 )
 
 // ProcessRules parses the rules from the given path and returns the original, the selected and the decomposed rules.
-func ProcessRules(specPath, role string, decompose bool) ([]*rule.Rule, []*rule.Rule, []*rule.Rule, error) {
-	rules, err := parser.ParseRules(context.Background(), specPath)
+func ProcessRules(specPath, role string, decompose bool, defines []string) ([]*rule.Rule, []*rule.Rule, []*rule.Rule, error) {
+	rules, err := parser.ParseFile(context.Background(), specPath, defines)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("cannot process rules: %w", err)
 	}
@@ -90,6 +90,11 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 			value := fieldValue.String()
 			// Type is already known due to reflection.
 			cmd.PersistentFlags().StringVarP(fieldValue.Addr().Interface().(*string), flag, short, value, desc) // Set default value
+		case reflect.Slice:
+			if fieldValue.Type().Elem().Kind() == reflect.String {
+				// Handle []string type
+				cmd.PersistentFlags().StringSliceVarP(fieldValue.Addr().Interface().(*[]string), flag, short, nil, desc)
+			}
 		default:
 			// Ignore unsupported fields
 		}

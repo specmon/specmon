@@ -271,12 +271,31 @@ func (p *Parser) parseFacts(node *sitter.Node, factQuery *sitter.Query, factQuer
 	return facts
 }
 
-func ParseRules(ctx context.Context, filename string) ([]*rule.Rule, error) {
+// ParseFile reads the given file, preprocesses it with the given defines,
+// and parses the rules from it.
+func ParseFile(ctx context.Context, filename string, defines []string) ([]*rule.Rule, error) {
 	src, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, &ParseError{NewParser(filename, nil, nil), err}
 	}
 
+	// First parse for preprocessing
+	initialTree, err := Parse(ctx, src)
+	if err != nil {
+		// Create a parser instance for error reporting
+		p := NewParser(filename, src, spthy.GetLanguage())
+		return nil, &ParseError{p, err}
+	}
+
+	// Preprocess the source code
+	preprocessor := NewPreprocessor(src, defines)
+	preprocessedSrc := preprocessor.Run(initialTree.RootNode())
+
+	// Now, parse the preprocessed source to get the final AST
+	return parseRules(ctx, filename, preprocessedSrc)
+}
+
+func parseRules(ctx context.Context, filename string, src []byte) ([]*rule.Rule, error) {
 	p := NewParser(filename, src, spthy.GetLanguage())
 
 	sitterParser := sitter.NewParser()
@@ -346,6 +365,14 @@ func ParseRules(ctx context.Context, filename string) ([]*rule.Rule, error) {
 	}
 
 	return rules, nil
+}
+
+// Parse parses the given source code and returns a tree-sitter tree.
+func Parse(ctx context.Context, source []byte) (*sitter.Tree, error) {
+	parser := sitter.NewParser()
+	lang := spthy.GetLanguage()
+	parser.SetLanguage(lang)
+	return parser.ParseCtx(ctx, nil, source)
 }
 
 // parseRuleAttributes parses the attributes of a rule node and returns a map of attribute key-value pairs.
