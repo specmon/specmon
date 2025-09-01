@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,7 +206,7 @@ func (m *Monitor) findPossibleEvents() [][]term.Term {
 		var e []term.Term
 		for _, rs := range m.rules {
 			for _, r := range rs {
-				for _, b := range conflictSet(c.facts, r.LHS).Values() {
+				for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 					s := r.Subst(b)
 					e = append(e, s.Hints()...)
 					e = append(e, s.Triggers()...)
@@ -254,7 +255,7 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 	log.Tracef("handleTriggers(%s, %s, %s)\n\n", c, a, r.Name)
 
 	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSet(c.facts, r.LHS).Values() {
+	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 		// Instantiate the triggers with the found binding.
 		// This ensures
 		//   1. The binding found is compatible with b.
@@ -270,7 +271,7 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 		d := c.Clone()
 		d.AddSeen(a.Subst(bt))
 
-		triggerBindings := conflictSet(d.seen, instTriggers)
+		triggerBindings := conflictSetTerms(d.seen, instTriggers)
 
 		if triggerBindings.Empty() {
 			log.Infof("rule %s is not applicable: missing triggers", r.Name)
@@ -308,7 +309,7 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 	aName := splitPairFirstName(a)
 
 	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSet(c.facts, r.LHS).Values() {
+	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 		// Instantiate the hints with the found binding.
 		// This ensures
 		//   1. The binding found is compatible with b.
@@ -360,7 +361,7 @@ func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
 	var C []*Config
 
 	for _, r := range rules[""] {
-		for _, b := range conflictSet(c.facts, r.LHS).Values() {
+		for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 			log.Infof("epsilon rule %s is applicable\n  binding: %s", r.Name, b)
 
 			d, err := c.ApplyRule(r, b)
@@ -384,38 +385,122 @@ func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
 	return C[0], nil
 }
 
-func conflictSet[E any, T Unifier[E]](facts, body []T) *data.HashSet[*term.Binding] {
-	log.Debugf("conflictSet( %v, %v )\n", facts, body)
+func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term) *data.HashSet[*term.Binding] {
+	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
-	type QueueItem struct {
-		index int
-		binds *term.Binding
+	// Index items by name.
+	itemsByName := make(map[string][]T, len(items))
+	for _, item := range items {
+		if indexable(item) {
+			itemsByName[name(item)] = append(itemsByName[name(item)], item)
+		}
 	}
 
-	var item QueueItem
+	// Pre-filter candidates per body atom by constant positions for ordering.
+	n := len(body)
+	prefilter := make([][]T, n)
+	order := make([]int, n)
 
-	queue := []QueueItem{{0, term.NewBinding()}}
-	B := data.NewHashSet[*term.Binding]()
+	for i, p := range body {
+		var cands []T
+		if indexable(p) {
+			cands = itemsByName[name(p)]
+			if len(cands) == 0 {
+				// No matches possible at all.
+				return data.NewHashSet[*term.Binding]()
+			}
+			// Filter by constants in p (cheap check before unification).
+			filtered := make([]T, 0, len(cands))
+			for _, f := range cands {
+				ok := true
+				pArgs := args(p)
+				fArgs := args(f)
+				// This check assumes len(pArgs) == len(fArgs), which should hold for unification candidates.
+				if len(pArgs) == len(fArgs) {
+					for j, a := range pArgs {
+						if a.GetType() == term.ConstantType {
+							if !a.Equal(fArgs[j]) {
+								ok = false
+								break
+							}
+						}
+					}
+				} else {
+					ok = false
+				}
 
-	for len(queue) > 0 {
-		item, queue = queue[0], queue[1:]
+				if ok {
+					filtered = append(filtered, f)
+				}
+			}
+			prefilter[i] = filtered
+		} else {
+			// Fallback: no indexing possible, scan all items.
+			prefilter[i] = items
+		}
+		order[i] = i
+	}
+	// Sort atoms by increasing number of prefiltered candidates to prune early.
+	sort.Slice(order, func(i, j int) bool { return len(prefilter[order[i]]) < len(prefilter[order[j]]) })
 
-		if item.index == len(body) {
-			B.Add(item.binds)
+	result := data.NewHashSet[*term.Binding]()
 
-			continue
+	var dfs func(pos int, b *term.Binding)
+	dfs = func(pos int, b *term.Binding) {
+		if pos == n {
+			result.Add(b)
+			return
 		}
 
-		pred := body[item.index].Subst(item.binds)
+		idx := order[pos]
+		p := body[idx]
+		// Apply current binding once per depth.
+		ps := p.Subst(b)
 
-		for _, fact := range facts {
-			if b, err := fact.Unify(pred); err == nil {
-				queue = append(queue, QueueItem{item.index + 1, b.Extend(item.binds)})
+		for _, f := range prefilter[idx] {
+			if delta, err := f.Unify(ps); err == nil {
+				dfs(pos+1, delta.Extend(b))
 			}
 		}
 	}
 
-	return B
+	dfs(0, term.NewBinding())
+	return result
+}
+
+// conflictSetFacts matches a sequence of fact patterns against a multiset of facts.
+// It builds a per-predicate local index and uses DFS with early filtering by constants.
+func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *data.HashSet[*term.Binding] {
+	return conflictSet(facts, body,
+		func(_ *rule.Fact) bool { return true },
+		func(f *rule.Fact) string { return f.Name },
+		func(f *rule.Fact) []term.Term { return f.Args },
+	)
+}
+
+// conflictSetTerms matches a sequence of term patterns against a set of seen terms.
+// It builds a local index by function name and orders patterns by selectivity.
+func conflictSetTerms(seen []term.Term, body []term.Term) *data.HashSet[*term.Binding] {
+	return conflictSet(seen, body,
+		func(t term.Term) bool {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil && fn.Name != term.PairFunctionName {
+				return true
+			}
+			return false
+		},
+		func(t term.Term) string {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil {
+				return fn.Name
+			}
+			return ""
+		},
+		func(t term.Term) []term.Term {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil {
+				return fn.Args
+			}
+			return nil
+		},
+	)
 }
 
 //
