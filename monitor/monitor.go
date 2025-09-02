@@ -592,17 +592,14 @@ func (s *Stats) JSON() string {
 	return string(jsonStats)
 }
 
-func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term) {
-	out := make(chan *TimedEvent, outChanSize)
-	consumed := make(chan term.Term, consumedChanSize)
+// ParseEvents converts an io.Reader containing JSON events into a channel of TimedEvent.
+// It handles JSON parsing and filtering of comment lines.
+func ParseEvents(r io.Reader, pid int) <-chan *TimedEvent {
+	events := make(chan *TimedEvent, outChanSize)
 	s := bufio.NewScanner(r)
 
-	m.stats.StartTime = time.Now()
-
 	go func() {
-		defer close(out)
-		defer close(consumed)
-		defer func() { m.stats.EndTime = time.Now() }()
+		defer close(events)
 
 		for s.Scan() {
 			if strings.HasPrefix(s.Text(), "//") {
@@ -617,7 +614,35 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 				log.Fatalf("failed to parse event: %v", err)
 			}
 
-			if event.Event == nil {
+			events <- event
+		}
+
+		if err := s.Err(); err != nil {
+			if err := utils.KillProcess(pid); err != nil {
+				log.Errorf("failed to kill process: %v", err)
+			}
+			log.Fatalf("scanner error: %v", err)
+		}
+	}()
+
+	return events
+}
+
+// ProcessEvents processes events from a channel and returns output channels.
+// This is the core processing function that handles the monitoring logic.
+func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term) {
+	out := make(chan *TimedEvent, outChanSize)
+	consumed := make(chan term.Term, consumedChanSize)
+
+	m.stats.StartTime = time.Now()
+
+	go func() {
+		defer close(out)
+		defer close(consumed)
+		defer func() { m.stats.EndTime = time.Now() }()
+
+		for event := range events {
+			if event == nil || event.Event == nil {
 				if err := utils.KillProcess(pid); err != nil {
 					log.Errorf("failed to kill process: %v", err)
 				}
@@ -625,7 +650,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 			}
 
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
-			// log.Infof("processing event: %s", event.Event)
+
 			if err := m.ProcessEvent(event.Event); err != nil {
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
@@ -639,6 +664,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 				}
 				log.Fatalf("error processing event: %v %s", err, event.Event)
 			}
+
 			m.stats.LatenciesProcessed = append(m.stats.LatenciesProcessed, time.Since(time.Unix(0, event.Time)))
 
 			if rewrite {
@@ -658,15 +684,6 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 			} else {
 				consumed <- event.Event
 			}
-		}
-
-		m.stats.EndTime = time.Now()
-
-		if err := s.Err(); err != nil {
-			if err := utils.KillProcess(pid); err != nil {
-				log.Errorf("failed to kill process: %v", err)
-			}
-			log.Fatalf("scanner error: %v", err)
 		}
 
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())

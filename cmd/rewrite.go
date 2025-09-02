@@ -75,7 +75,8 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
 
-	outs, _ := m.ProcessEventsFromReader(eventSource, true, -1)
+	events := monitor.ParseEvents(eventSource, -1)
+	outs, _ := m.ProcessEvents(events, true, -1)
 
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {
