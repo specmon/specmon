@@ -49,7 +49,7 @@ func ProcessRules(specPath, role string, decompose bool, defines []string) ([]*r
 	var decompRules []*rule.Rule
 	if decompose {
 		for _, r := range selectedRules {
-			if !r.NoDecomp() {
+			if !r.NoDecomp() && !r.HasHints() && !r.HasTriggers() {
 				decompRules = append(decompRules, rule.Translate(r)...)
 			} else {
 				decompRules = append(decompRules, r)

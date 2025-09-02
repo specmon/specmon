@@ -1,0 +1,9 @@
+theory SimpleFunction
+begin
+
+rule TestRule:
+  [ State0(m) ] 
+  --> 
+  [ Out(len(hash(m))), State1(m) ]
+
+end
