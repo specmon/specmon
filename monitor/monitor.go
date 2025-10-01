@@ -388,30 +388,31 @@ func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
 func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term) *data.HashSet[*term.Binding] {
 	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
-	// Index items by name.
-	itemsByName := make(map[string][]T, len(items))
-	for _, item := range items {
+	// Index items by name, keeping track of original indices
+	itemsByName := make(map[string][]int, len(items))
+	for i, item := range items {
 		if indexable(item) {
-			itemsByName[name(item)] = append(itemsByName[name(item)], item)
+			itemsByName[name(item)] = append(itemsByName[name(item)], i)
 		}
 	}
 
 	// Pre-filter candidates per body atom by constant positions for ordering.
 	n := len(body)
-	prefilter := make([][]T, n)
+	prefilter := make([][]int, n)
 	order := make([]int, n)
 
 	for i, p := range body {
-		var cands []T
+		var candIndices []int
 		if indexable(p) {
-			cands = itemsByName[name(p)]
-			if len(cands) == 0 {
+			candIndices = itemsByName[name(p)]
+			if len(candIndices) == 0 {
 				// No matches possible at all.
 				return data.NewHashSet[*term.Binding]()
 			}
 			// Filter by constants in p (cheap check before unification).
-			filtered := make([]T, 0, len(cands))
-			for _, f := range cands {
+			filtered := make([]int, 0, len(candIndices))
+			for _, idx := range candIndices {
+				f := items[idx]
 				ok := true
 				pArgs := args(p)
 				fArgs := args(f)
@@ -430,13 +431,17 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 				}
 
 				if ok {
-					filtered = append(filtered, f)
+					filtered = append(filtered, idx)
 				}
 			}
 			prefilter[i] = filtered
 		} else {
 			// Fallback: no indexing possible, scan all items.
-			prefilter[i] = items
+			allIndices := make([]int, len(items))
+			for j := range items {
+				allIndices[j] = j
+			}
+			prefilter[i] = allIndices
 		}
 		order[i] = i
 	}
@@ -445,8 +450,10 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	result := data.NewHashSet[*term.Binding]()
 
-	var dfs func(pos int, b *term.Binding)
-	dfs = func(pos int, b *term.Binding) {
+	// Track which items from the original items slice have been used.
+	// This ensures multiset semantics s.t. each fact can only be consumed once.
+	var dfs func(pos int, b *term.Binding, usedItems map[int]bool)
+	dfs = func(pos int, b *term.Binding, usedItems map[int]bool) {
 		if pos == n {
 			result.Add(b)
 			return
@@ -457,14 +464,26 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 		// Apply current binding once per depth.
 		ps := p.Subst(b)
 
-		for _, f := range prefilter[idx] {
+		for _, itemIdx := range prefilter[idx] {
+			// Skip if this fact has already been used in this binding path
+			if usedItems[itemIdx] {
+				continue
+			}
+
+			f := items[itemIdx]
 			if delta, err := f.Unify(ps); err == nil {
-				dfs(pos+1, delta.Extend(b))
+				// Create new used items map with this item marked as used
+				newUsedItems := make(map[int]bool)
+				for k, v := range usedItems {
+					newUsedItems[k] = v
+				}
+				newUsedItems[itemIdx] = true
+				dfs(pos+1, delta.Extend(b), newUsedItems)
 			}
 		}
 	}
 
-	dfs(0, term.NewBinding())
+	dfs(0, term.NewBinding(), make(map[int]bool))
 	return result
 }
 
