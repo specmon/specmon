@@ -22,6 +22,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	log "github.com/sirupsen/logrus"
+	"github.com/specmon/specmon/utils"
 	"hash/fnv"
 	"slices"
 	"strings"
@@ -234,4 +236,31 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	}
 
 	return newFacts
+}
+
+// LogArgs logs a formatted representation of the fact's name and arguments.
+func (f *Fact) LogArgs(settings map[string]interface{}) {
+	argMaxLen, ok := settings["logArgTruncate"].(int64)
+	if !ok {
+		panic("Unexpected type for logArgTruncate")
+	}
+
+	argStrings := make([]string, len(f.Args))
+	if argMaxLen == 0 {
+		log.Warnf("  %s", f.Name)
+		return
+	}
+
+	for i, arg := range f.Args {
+		argStr := arg.String()
+		if argMaxLen != -1 {
+			// +2 to account for a potential "0x" prefix, as in the original logic
+			argStrings[i] = utils.TruncateString(argStr, argMaxLen+2) + "..."
+		} else {
+			argStrings[i] = argStr
+		}
+	}
+
+	argsJoined := strings.Join(argStrings, ", ")
+	log.Warnf("  %s(%s)", f.Name, argsJoined)
 }

@@ -48,6 +48,7 @@ type RootConfig struct {
 	SpecPath       string   `flag:"spec-path"        short:"s" desc:"specification path"`
 	CPUProfilePath string   `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
 	MemProfilePath string   `flag:"mem-profile-path" short:"m" desc:"memory profile path"`
+	LogArgTruncate int64    `flag:"log-arg-truncate" desc:"Max length of logged arguments within facts. Default is -1 for no limit."`
 }
 
 // DefaultRootConfig returns the default configuration of the root command.

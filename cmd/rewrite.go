@@ -70,7 +70,15 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 	defer eventSource.Close()
 
-	m, err = monitor.NewMonitor(decompRules)
+	// Retrieve User Settings
+	// factArgMaxLen specifies the maximum length of a fact's arguments before they are truncated in log output.
+	logArgTruncate, err := cmd.Root().Flags().GetInt64("log-arg-truncate")
+
+	// Define User Settings for Monitor
+	settings := make(map[string]interface{})
+	settings["logArgTruncate"] = logArgTruncate
+
+	m, err = monitor.NewMonitor(decompRules, settings)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}

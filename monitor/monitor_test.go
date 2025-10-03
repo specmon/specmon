@@ -19,6 +19,7 @@
 package monitor_test
 
 import (
+	"github.com/specmon/specmon/cmd"
 	"testing"
 
 	"github.com/specmon/specmon/monitor"
@@ -51,8 +52,16 @@ func TestMonitorMultipleFrFacts(t *testing.T) {
 		},
 	}
 
+	// Retrieve User Settings
+	// factArgMaxLen specifies the maximum length of a fact's arguments before they are truncated in log output.
+	logArgTruncate, err := cmd.Root().Flags().GetInt64("log-arg-truncate")
+
+	// Define User Settings for Monitor
+	settings := make(map[string]interface{})
+	settings["logArgTruncate"] = logArgTruncate
+
 	// Create monitor with this rule
-	mon, err := monitor.NewMonitor([]*rule.Rule{testRule})
+	mon, err := monitor.NewMonitor([]*rule.Rule{testRule}, settings)
 	if err != nil {
 		t.Fatalf("Failed to create monitor: %v", err)
 	}

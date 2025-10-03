@@ -171,11 +171,11 @@ func MedianDuration(numbers []time.Duration) float64 {
 	return float64(numbers[middle])
 }
 
-// should be kind of https://docs.python.org/3/library/functions.html#map
-func Map[T, V any](ts []T, fn func(T) V) []V {
-	result := make([]V, len(ts))
-	for i, t := range ts {
-		result[i] = fn(t)
+// truncateString shortens a string to maxLen
+func TruncateString(s string, maxLen int64) string {
+	length := int64(len(s))
+	if length > maxLen {
+		return s[:maxLen]
 	}
-	return result
+	return s
 }
