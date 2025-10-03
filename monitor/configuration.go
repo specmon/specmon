@@ -278,7 +278,7 @@ func restrSatisfied(trace []*rule.Fact) error {
 				return fmt.Errorf("event restriction violated: %s", t)
 			}
 		default:
-			return fmt.Errorf("used unknown action: %s", t)
+			log.Warnf("ignoring action: %s", t)
 		}
 	}
 
