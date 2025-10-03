@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	"github.com/specmon/specmon/utils"
 	"hash/fnv"
 	"slices"
 	"strings"
@@ -238,6 +237,15 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	return newFacts
 }
 
+// truncateString shortens a string to maxLen and appends '...' if the string was truncated
+func truncateString(s string, maxLen int64) string {
+	length := int64(len(s))
+	if length > maxLen {
+		return s[:maxLen] + "..."
+	}
+	return s
+}
+
 // LogArgs logs a formatted representation of the fact's name and arguments.
 // if logArgTruncate is 0 do not print arguments
 // if logArgTruncate is -1 print full arg string
@@ -263,8 +271,7 @@ func (f *Fact) LogArgs(settings map[string]interface{}) {
 		}
 		argStr := arg.String()
 		if argMaxLen != -1 {
-			// +2 to account for a potential "0x" prefix, as in the original logic
-			argStr = utils.TruncateString(argStr, argMaxLen+2) + "..."
+			argStr = truncateString(argStr, argMaxLen)
 		}
 		b.WriteString(argStr)
 	}

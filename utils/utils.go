@@ -170,12 +170,3 @@ func MedianDuration(numbers []time.Duration) float64 {
 
 	return float64(numbers[middle])
 }
-
-// truncateString shortens a string to maxLen
-func TruncateString(s string, maxLen int64) string {
-	length := int64(len(s))
-	if length > maxLen {
-		return s[:maxLen]
-	}
-	return s
-}
