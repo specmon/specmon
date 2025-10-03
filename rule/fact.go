@@ -241,7 +241,7 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 func truncateString(s string, maxLen int64) string {
 	length := int64(len(s))
 	if length > maxLen {
-		return s[:maxLen] + "..."
+		return s[:maxLen] + "..." + fmt.Sprintf("{%d}", length)
 	}
 	return s
 }
