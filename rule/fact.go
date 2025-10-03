@@ -239,28 +239,36 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 }
 
 // LogArgs logs a formatted representation of the fact's name and arguments.
+// if logArgTruncate is 0 do not print arguments
+// if logArgTruncate is -1 print full arg string
+// else print max length printed for each arg is logArgTrucate
 func (f *Fact) LogArgs(settings map[string]interface{}) {
+	// retrieve Settings
 	argMaxLen, ok := settings["logArgTruncate"].(int64)
 	if !ok {
 		panic("Unexpected type for logArgTruncate")
 	}
 
-	argStrings := make([]string, len(f.Args))
+	// check if printing arguments is disabled
 	if argMaxLen == 0 {
 		log.Warnf("  %s", f.Name)
 		return
 	}
 
+	// construct argument string
+	var b strings.Builder
 	for i, arg := range f.Args {
+		if i > 0 {
+			b.WriteString(", ")
+		}
 		argStr := arg.String()
 		if argMaxLen != -1 {
 			// +2 to account for a potential "0x" prefix, as in the original logic
-			argStrings[i] = utils.TruncateString(argStr, argMaxLen+2) + "..."
-		} else {
-			argStrings[i] = argStr
+			argStr = utils.TruncateString(argStr, argMaxLen+2) + "..."
 		}
+		b.WriteString(argStr)
 	}
 
-	argsJoined := strings.Join(argStrings, ", ")
-	log.Warnf("  %s(%s)", f.Name, argsJoined)
+	// print as warning
+	log.Warnf("  %s(%s)", f.Name, b.String())
 }
