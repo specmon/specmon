@@ -20,6 +20,7 @@ package term_test
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -592,3 +593,101 @@ func TestFormatToBytes(t *testing.T) {
 	}
 }
 */
+
+// TestFormatLengthConstraint tests that format parsing enforces exact length matching.
+// This is a regression test for a bug where patterns with different byte lengths
+// could incorrectly unify, causing "cannot delete non-existing fact" errors during monitoring.
+func TestFormatLengthConstraint(t *testing.T) {
+	t.Parallel()
+
+	// Create a format pattern: cat(byte(x, 2), byte(y, 3))
+	// This should only match exactly 5 bytes
+	pattern := term.NewFunction("cat", []term.Term{
+		term.NewFunction("byte", []term.Term{
+			term.NewVariable("x"),
+			term.NewConstant[int](2),
+		}),
+		term.NewFunction("byte", []term.Term{
+			term.NewVariable("y"),
+			term.NewConstant[int](3),
+		}),
+	})
+
+	// Test case 1: Exact match (5 bytes) - should succeed
+	t.Run("ExactMatch", func(t *testing.T) {
+		data := term.NewConstant[[]byte]([]byte{0x01, 0x02, 0x03, 0x04, 0x05})
+		_, err := pattern.Unify(data)
+		if err != nil {
+			t.Errorf("Expected successful unification for exact match, got error: %v", err)
+		}
+	})
+
+	// Test case 2: Too short (4 bytes) - should fail
+	t.Run("TooShort", func(t *testing.T) {
+		data := term.NewConstant[[]byte]([]byte{0x01, 0x02, 0x03, 0x04})
+		_, err := pattern.Unify(data)
+		if err == nil {
+			t.Error("Expected unification to fail for too short data, but it succeeded")
+		}
+		// Error is wrapped as ErrInvalidFormat during unification
+		if !errors.Is(err, term.ErrInvalidFormat) {
+			t.Errorf("Expected ErrInvalidFormat, got: %v", err)
+		}
+	})
+
+	// Test case 3: Too long (7 bytes) - should fail
+	// This is the bug we're fixing: extra bytes should cause failure
+	t.Run("TooLong", func(t *testing.T) {
+		data := term.NewConstant[[]byte]([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07})
+		_, err := pattern.Unify(data)
+		if err == nil {
+			t.Error("Expected unification to fail for too long data, but it succeeded")
+		}
+		// Error is wrapped as ErrInvalidFormat during unification
+		if !errors.Is(err, term.ErrInvalidFormat) {
+			t.Errorf("Expected ErrInvalidFormat, got: %v", err)
+		}
+	})
+
+	// Test case 4: Multiple patterns with different lengths should not cross-match
+	t.Run("DifferentLengthPatterns", func(t *testing.T) {
+		// Pattern 1: cat(byte(a, 2), byte(b, 3)) = 5 bytes total
+		pattern1 := term.NewFunction("cat", []term.Term{
+			term.NewFunction("byte", []term.Term{
+				term.NewVariable("a"),
+				term.NewConstant[int](2),
+			}),
+			term.NewFunction("byte", []term.Term{
+				term.NewVariable("b"),
+				term.NewConstant[int](3),
+			}),
+		})
+
+		// Pattern 2: cat(byte(a, 2), byte(b, 5)) = 7 bytes total
+		pattern2 := term.NewFunction("cat", []term.Term{
+			term.NewFunction("byte", []term.Term{
+				term.NewVariable("a"),
+				term.NewConstant[int](2),
+			}),
+			term.NewFunction("byte", []term.Term{
+				term.NewVariable("b"),
+				term.NewConstant[int](5),
+			}),
+		})
+
+		// Data with 7 bytes
+		data := term.NewConstant[[]byte]([]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07})
+
+		// pattern1 (5 bytes) should NOT match data (7 bytes)
+		_, err1 := pattern1.Unify(data)
+		if err1 == nil {
+			t.Error("Pattern expecting 5 bytes incorrectly matched 7 bytes of data")
+		}
+
+		// pattern2 (7 bytes) SHOULD match data (7 bytes)
+		_, err2 := pattern2.Unify(data)
+		if err2 != nil {
+			t.Errorf("Pattern expecting 7 bytes should match 7 bytes of data, got error: %v", err2)
+		}
+	})
+}
