@@ -69,9 +69,9 @@ func main() {
 	if err != nil {
 		fmt.Println("Error:", err)
 	} else {
-		fmt.Println("Original:", bytes)
+		fmt.Println("Original:", string(bytes))
 	}
 
 	optimizedBytes := IntToBytesOptimized(12345678, binary.BigEndian)
-	fmt.Println("Optimized:", optimizedBytes)
+	fmt.Println("Optimized:", string(optimizedBytes))
 }

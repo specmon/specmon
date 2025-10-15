@@ -56,7 +56,7 @@ func TestTranslationFromFiles(t *testing.T) {
 
 // assertRulesEqual compares two rule slices, handling ordering and formatting differences.
 func assertRulesEqual(t *testing.T, expected, actual []*rule.Rule) {
-	require.Equal(t, len(expected), len(actual), "Different number of rules")
+	require.Len(t, actual, len(expected), "Different number of rules")
 
 	// Sort rules by name for consistent comparison
 	sortRulesByName := func(rules []*rule.Rule) []*rule.Rule {
@@ -80,11 +80,11 @@ func assertRulesEqual(t *testing.T, expected, actual []*rule.Rule) {
 			"Rule %d: Name mismatch", i)
 
 		// Compare LHS, Act, RHS lengths
-		require.Equal(t, len(expectedRule.LHS), len(actualRule.LHS),
+		require.Len(t, actualRule.LHS, len(expectedRule.LHS),
 			"Rule %s: LHS length mismatch", expectedRule.Name)
-		require.Equal(t, len(expectedRule.Act), len(actualRule.Act),
+		require.Len(t, actualRule.Act, len(expectedRule.Act),
 			"Rule %s: Act length mismatch", expectedRule.Name)
-		require.Equal(t, len(expectedRule.RHS), len(actualRule.RHS),
+		require.Len(t, actualRule.RHS, len(expectedRule.RHS),
 			"Rule %s: RHS length mismatch", expectedRule.Name)
 
 		// For more detailed comparison, we could implement structural equality.
