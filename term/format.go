@@ -38,6 +38,7 @@ const (
 var (
 	ErrVariableInField   = errors.New("field contains a variable")
 	ErrSliceTooShort     = errors.New("byte slice too short")
+	ErrSliceTooLong      = errors.New("byte slice too long: not all bytes consumed")
 	ErrByteConversion    = errors.New("cannot convert bytes to constant")
 	ErrVariableRedefined = errors.New("variable already defined")
 	ErrConstantsNoMatch  = errors.New("constants do not match")
@@ -113,6 +114,11 @@ func ParseFormat(fields []*Function, s []byte) (*Binding, error) {
 
 		// Move to the next field in the byte slice.
 		n += length
+	}
+
+	// Ensure all bytes have been consumed to avoid matching formats with different lengths
+	if n != len(s) {
+		return nil, ErrSliceTooLong
 	}
 
 	return b, nil
