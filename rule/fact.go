@@ -22,10 +22,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"hash/fnv"
 	"slices"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/specmon/specmon/term"
 )
@@ -237,7 +238,7 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	return newFacts
 }
 
-// truncateString shortens a string to maxLen and appends '...' if the string was truncated
+// truncateString shortens a string to maxLen and appends '...' if the string was truncated.
 func truncateString(s string, maxLen int64) string {
 	length := int64(len(s))
 	if length > maxLen {
@@ -246,10 +247,10 @@ func truncateString(s string, maxLen int64) string {
 	return s
 }
 
-// LogArgs logs a formatted representation of the fact's name and arguments.
-// if logArgTruncate is 0 do not print arguments
-// if logArgTruncate is -1 print full arg string
-// else print max length printed for each arg is logArgTrucate
+//	 LogArgs logs a formatted representation of the fact's name and arguments.
+//		if logArgTruncate is 0 do not print arguments.
+//		if logArgTruncate is -1 print full arg string.
+//		else print max length printed for each arg is logArgTruncate.
 func (f *Fact) LogArgs(settings map[string]interface{}) {
 	// retrieve Settings
 	argMaxLen, ok := settings["logArgTruncate"].(int64)

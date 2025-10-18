@@ -715,7 +715,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 		}
 
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
-		var counter int = 0
+		counter := 0
 		for _, c := range m.configs.Values() {
 			counter++
 			log.Warnf("Configuration %d\n", counter)
