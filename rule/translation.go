@@ -126,6 +126,14 @@ func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding)
 		if retVar := D.Label(d); retVar != nil {
 			fVars := nonPublicRuleVars(r)
 
+			// Add all public variables from the original rule's LHS
+			lhsVars := utils.Unique(Facts(r.LHS).Vars())
+			for _, v := range lhsVars {
+				if v.IsPublic() {
+					fVars = append(fVars, v)
+				}
+			}
+
 			// Find orignal function in F and add public variables to the fact.
 			F.IterateSorted(func(k, v term.Term) bool {
 				if v.Equal(retVar) {
