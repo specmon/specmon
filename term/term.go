@@ -646,34 +646,56 @@ func (e *UnificationError) Error() string {
 }
 
 func unify(a1, a2 Term, b *Binding) error {
+	// Fast path: check types first before expensive Equal()
+	t1Type := a1.GetType()
+	t2Type := a2.GetType()
+
+	// Early termination for obviously incompatible types
+	if t1Type == ConstantType && t2Type == ConstantType {
+		// For constants, Equal is relatively cheap, do it early
+		if !a1.Equal(a2) {
+			return ErrConstantsNoMatch
+		}
+		return nil
+	}
+
+	// For functions, check name/arity before full equality
+	if t1Type == FunctionType && t2Type == FunctionType {
+		f1 := Must(AsFunction(a1))
+		f2 := Must(AsFunction(a2))
+
+		// Quick rejection: name or arity mismatch
+		if f1.Name != f2.Name || len(f1.Args) != len(f2.Args) {
+			return ErrNameOrArgMismatch
+		}
+
+		// Now check full equality (which recurses into args)
+		if a1.Equal(a2) {
+			return nil
+		}
+
+		// Not equal but compatible, continue with unification
+		for i := range f1.Args {
+			if err := unify(f1.Args[i], f2.Args[i], b); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// For other combinations, do standard equality check
 	if a1.Equal(a2) {
 		return nil
 	}
 
 	switch {
-	case a1.GetType() == FunctionType && a2.GetType() == FunctionType:
-		// Two functions are unifiable if
-		// - they have the same name and
-		// - number of arguments and
-		// - their arguments are unifiable.
-		t1 := Must(AsFunction(a1))
-		t2 := Must(AsFunction(a2))
-
-		if t1.Name != t2.Name || len(t1.Args) != len(t2.Args) {
-			// return &UnificationError{a1, a2, "name or number of arguments do not match"}
-			return ErrNameOrArgMismatch
-		}
-
-		for i := range t1.Args {
-			if err := unify(t1.Args[i], t2.Args[i], b); err != nil {
-				// return &UnificationError{a1, a2, err.Error()}
-				return err
-			}
-		}
-	case a1.GetType() == FunctionType && a2.GetType() == VariableType:
+	case t1Type == FunctionType && t2Type == FunctionType:
+		// Already handled above
+		return nil
+	case t1Type == FunctionType && t2Type == VariableType:
 		// Swap the order of the terms and try again.
 		return unify(a2, a1, b)
-	case a1.GetType() == FunctionType && a2.GetType() == ConstantType:
+	case t1Type == FunctionType && t2Type == ConstantType:
 		// A function is unifiable with a constant if
 		// - the function is a format and
 		// - the evaluated format is equal to the constant.
@@ -715,10 +737,10 @@ func unify(a1, a2 Term, b *Binding) error {
 		})
 
 		return nil
-	case a1.GetType() == ConstantType && (a2.GetType() == FunctionType || a2.GetType() == VariableType):
+	case t1Type == ConstantType && (t2Type == FunctionType || t2Type == VariableType):
 		// Swap the order of the terms and try again.
 		return unify(a2, a1, b)
-	case a1.GetType() == VariableType:
+	case t1Type == VariableType:
 		v := Must(AsVariable(a1))
 
 		if slices.Contains(Vars(a2), v) {
@@ -733,12 +755,9 @@ func unify(a1, a2 Term, b *Binding) error {
 		})
 
 		b.Set(v, a2)
-	case a1.GetType() == ConstantType && a2.GetType() == ConstantType:
-		// Two constants are unifiable if they are equal.
-		if !a1.Equal(a2) {
-			// return &UnificationError{a1, a2, "constants are not equal"}
-			return ErrConstantsNoMatch
-		}
+	case t1Type == ConstantType && t2Type == ConstantType:
+		// Already handled at the top with early termination
+		return nil
 	default:
 		return ErrUnknownType
 	}
