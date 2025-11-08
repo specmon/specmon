@@ -343,6 +343,10 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 
 		D := data.NewHashSet[RuleApplication]()
 		for _, rr := range rules[aName] {
+			// Skip rules without triggers - we only want to apply trigger rules here
+			if !rr.HasTriggers() {
+				continue
+			}
 			next, err := handleTriggers(d, g, rr, rules)
 			if err != nil {
 				return nil, err
@@ -461,8 +465,11 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	// Track which items from the original items slice have been used.
 	// This ensures multiset semantics s.t. each fact can only be consumed once.
-	var dfs func(pos int, b *term.Binding, usedItems map[int]bool)
-	dfs = func(pos int, b *term.Binding, usedItems map[int]bool) {
+	// Use backtracking (mark/unmark) instead of copying map on each recursive call.
+	usedItems := make(map[int]bool)
+
+	var dfs func(pos int, b *term.Binding)
+	dfs = func(pos int, b *term.Binding) {
 		if pos == n {
 			result.Add(b)
 			return
@@ -481,18 +488,16 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 			f := items[itemIdx]
 			if delta, err := f.Unify(ps); err == nil {
-				// Create new used items map with this item marked as used
-				newUsedItems := make(map[int]bool)
-				for k, v := range usedItems {
-					newUsedItems[k] = v
-				}
-				newUsedItems[itemIdx] = true
-				dfs(pos+1, delta.Extend(b), newUsedItems)
+				// Mark item as used (backtracking pattern)
+				usedItems[itemIdx] = true
+				dfs(pos+1, delta.Extend(b))
+				// Unmark item for other branches
+				delete(usedItems, itemIdx)
 			}
 		}
 	}
 
-	dfs(0, term.NewBinding(), make(map[int]bool))
+	dfs(0, term.NewBinding())
 	return result
 }
 

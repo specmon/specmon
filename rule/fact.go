@@ -121,7 +121,9 @@ func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
 		return nil, ErrFactUnify
 	}
 
-	b := term.NewBinding()
+	// Optimization: collect all non-empty partial bindings to avoid repeated Extend() operations
+	// Skip empty bindings since they don't contribute anything
+	var partials []*term.Binding
 
 	for i, a := range f.Args {
 		b1, err := a.Unify(other.Args[i])
@@ -129,8 +131,21 @@ func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
 			// return nil, fmt.Errorf("cannot unify %s and %s: %w", f, other, err)
 			return nil, ErrFactUnify
 		}
+		// Only collect non-empty bindings
+		if b1.Size() > 0 {
+			partials = append(partials, b1)
+		}
+	}
 
-		b = b.Extend(b1)
+	// Fast path: if no bindings were created, return empty binding
+	if len(partials) == 0 {
+		return term.NewBinding(), nil
+	}
+
+	// Now merge all bindings at once
+	b := term.NewBinding()
+	for _, partial := range partials {
+		b = b.Extend(partial)
 	}
 
 	return b, nil
