@@ -48,7 +48,10 @@ const (
 	consumedChanSize = 4096
 )
 
-var ErrNoApplicableRule = errors.New("no applicable rule found")
+var (
+	ErrNoApplicableRule    = errors.New("no applicable rule found")
+	ErrRestrictionViolated = errors.New("restriction violated")
+)
 
 type Unifier[T any] interface {
 	fmt.Stringer
@@ -303,6 +306,9 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 				}
 
 				C.Add(RuleApplication{r, withTrigger, e})
+			} else if errors.Is(err, ErrRestrictionViolated) {
+				log.Infof("rule %s not applicable due to restriction: %v", r.Name, err)
+				continue
 			} else {
 				return nil, err
 			}
@@ -335,6 +341,10 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 
 		d, err := c.ApplyRule(r, hb)
 		if err != nil {
+			if errors.Is(err, ErrRestrictionViolated) {
+				log.Infof("hint rule %s not applicable due to restriction: %v", r.Name, err)
+				continue
+			}
 			return nil, err
 		}
 

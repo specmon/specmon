@@ -20,6 +20,7 @@ package monitor
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -223,6 +224,10 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, error) {
 
 	// Check if special event restrictions are satisfied.
 	if err := restrSatisfied(t.Act); err != nil {
+		// Don't wrap restriction violations to avoid redundant error messages
+		if errors.Is(err, ErrRestrictionViolated) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("rule not applied: %w", err)
 	}
 
@@ -268,14 +273,14 @@ func restrSatisfied(trace []*rule.Fact) error {
 				return fmt.Errorf("event restriction: %s must have two arguments", t.Name)
 			}
 			if !t.Args[0].Equal(t.Args[1]) {
-				return fmt.Errorf("event restriction violated: %s", t)
+				return fmt.Errorf("%w: %s", ErrRestrictionViolated, t)
 			}
 		case "Neq", "NotEqual", "Unequal":
 			if len(t.Args) != 2 {
 				return fmt.Errorf("event restriction: %s must have two arguments", t.Name)
 			}
 			if t.Args[0].Equal(t.Args[1]) {
-				return fmt.Errorf("event restriction violated: %s", t)
+				return fmt.Errorf("%w: %s", ErrRestrictionViolated, t)
 			}
 		default:
 			log.Warnf("ignoring action: %s", t)

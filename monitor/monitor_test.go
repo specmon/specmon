@@ -104,3 +104,143 @@ func TestMonitorMultipleFrFacts(t *testing.T) {
 
 	t.Logf("Processed event successfully, got %d result configs", len(resultConfigs))
 }
+
+// TestMonitorRestrictionViolation tests that when multiple rules can match an event
+// but one fails due to a restriction violation (e.g., Eq check), the monitor continues
+// to try other rules instead of returning an error immediately.
+func TestMonitorRestrictionViolation(t *testing.T) {
+	// Create an In rule that adds In(x) to state
+	inRule := &rule.Rule{
+		Name: "In",
+		LHS:  []*rule.Fact{},
+		RHS: []*rule.Fact{
+			rule.NewFact("In", []term.Term{term.NewVariable("x")}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{
+			"trigger": rule.TermAttribute{
+				Value: []term.Term{
+					term.NewFunction("pair", []term.Term{
+						term.NewFunction("in", []term.Term{}),
+						term.NewVariable("x"),
+					}),
+				},
+			},
+		},
+	}
+
+	// Create rule A: consumes In($x) with restriction Eq($x, '1')
+	ruleA := &rule.Rule{
+		Name: "A",
+		LHS: []*rule.Fact{
+			rule.NewFact("In", []term.Term{term.NewVariable("$x")}, rule.LinearFact),
+		},
+		RHS: []*rule.Fact{
+			rule.NewFact("A", []term.Term{
+				term.NewFunction("h", []term.Term{term.NewVariable("$x")}),
+			}, rule.LinearFact),
+		},
+		Act: []*rule.Fact{
+			rule.NewFact("Eq", []term.Term{
+				term.NewVariable("$x"),
+				term.NewConstant("1"),
+			}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{
+			"trigger": rule.TermAttribute{
+				Value: []term.Term{
+					term.NewFunction("pair", []term.Term{
+						term.NewFunction("h", []term.Term{term.NewVariable("$x")}),
+						term.NewVariable("h$x"),
+					}),
+				},
+			},
+		},
+	}
+
+	// Create rule B: consumes In($x) with restriction Eq($x, '2')
+	ruleB := &rule.Rule{
+		Name: "B",
+		LHS: []*rule.Fact{
+			rule.NewFact("In", []term.Term{term.NewVariable("$x")}, rule.LinearFact),
+		},
+		RHS: []*rule.Fact{
+			rule.NewFact("B", []term.Term{
+				term.NewFunction("h", []term.Term{term.NewVariable("$x")}),
+			}, rule.LinearFact),
+		},
+		Act: []*rule.Fact{
+			rule.NewFact("Eq", []term.Term{
+				term.NewVariable("$x"),
+				term.NewConstant("2"),
+			}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{
+			"trigger": rule.TermAttribute{
+				Value: []term.Term{
+					term.NewFunction("pair", []term.Term{
+						term.NewFunction("h", []term.Term{term.NewVariable("$x")}),
+						term.NewVariable("h$x"),
+					}),
+				},
+			},
+		},
+	}
+
+	// Create monitor with all three rules
+	mon, err := monitor.NewMonitor([]*rule.Rule{inRule, ruleA, ruleB})
+	if err != nil {
+		t.Fatalf("Failed to create monitor: %v", err)
+	}
+
+	// Process first event: <in(), 1>
+	inEvent := term.NewFunction("pair", []term.Term{
+		term.NewFunction("in", []term.Term{}),
+		term.NewConstant("1"),
+	})
+
+	err = mon.ProcessEvent(inEvent)
+	if err != nil {
+		t.Fatalf("ProcessEvent failed for in event: %v", err)
+	}
+
+	// Process second event: <h(1), 42>
+	hEvent := term.NewFunction("pair", []term.Term{
+		term.NewFunction("h", []term.Term{term.NewConstant("1")}),
+		term.NewConstant("42"),
+	})
+
+	err = mon.ProcessEvent(hEvent)
+	if err != nil {
+		t.Fatalf("ProcessEvent failed for h event: %v", err)
+	}
+
+	// Check the resulting configurations
+	resultConfigs := mon.Configs()
+	if len(resultConfigs) != 1 {
+		t.Fatalf("Expected 1 configuration, got %d", len(resultConfigs))
+	}
+
+	// Verify that rule A was applied (fact A exists) and rule B was not (fact B doesn't exist)
+	config := resultConfigs[0]
+	facts := config.Facts()
+
+	foundA := false
+	foundB := false
+	for _, fact := range facts {
+		if fact.Name == "A" {
+			foundA = true
+		}
+		if fact.Name == "B" {
+			foundB = true
+		}
+	}
+
+	if !foundA {
+		t.Errorf("Expected fact A to exist (rule A should have succeeded)")
+	}
+	if foundB {
+		t.Errorf("Expected fact B to not exist (rule B should have failed due to restriction)")
+	}
+
+	t.Logf("Test passed: Rule A succeeded, Rule B failed due to restriction violation")
+}
