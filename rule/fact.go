@@ -22,11 +22,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/specmon/specmon/data"
-	"github.com/specmon/specmon/utils"
 	"hash/fnv"
 	"slices"
 	"strings"
+
+	"github.com/specmon/specmon/data"
+	"github.com/specmon/specmon/utils"
 
 	log "github.com/sirupsen/logrus"
 

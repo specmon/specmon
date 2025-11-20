@@ -19,8 +19,9 @@
 package monitor_test
 
 import (
-	"github.com/specmon/specmon/data"
 	"testing"
+
+	"github.com/specmon/specmon/data"
 
 	"github.com/specmon/specmon/cmd"
 
