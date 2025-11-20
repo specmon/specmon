@@ -266,8 +266,6 @@ func splitPair(t term.Term) (term.Term, term.Term) {
 func restrSatisfied(trace []*rule.Fact) error {
 	for _, t := range trace {
 		switch t.Name {
-		case RewriteEventName:
-			// allowed event handled elsewhere
 		case "Eq", "Equal":
 			if len(t.Args) != 2 {
 				return fmt.Errorf("event restriction: %s must have two arguments", t.Name)
@@ -282,8 +280,6 @@ func restrSatisfied(trace []*rule.Fact) error {
 			if t.Args[0].Equal(t.Args[1]) {
 				return fmt.Errorf("%w: %s", ErrRestrictionViolated, t)
 			}
-		default:
-			log.Warnf("ignoring action: %s", t)
 		}
 	}
 
