@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/specmon/specmon/data"
 	"github.com/specmon/specmon/utils"
 	"hash/fnv"
 	"slices"
@@ -258,12 +259,9 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 //		if truncateArgs is 0 do not print arguments.
 //		if truncateArgs is -1 print full arg string.
 //		else print max length printed for each arg is truncateArgs.
-func (f *Fact) LogArgs(settings map[string]interface{}) {
+func (f *Fact) LogArgs(settings *data.Settings) {
 	// retrieve Settings
-	argMaxLen, ok := settings["truncateArgs"].(int64)
-	if !ok {
-		panic("Unexpected type for truncateArgs")
-	}
+	argMaxLen := settings.TruncateArgs
 
 	// check if printing arguments is disabled
 	if argMaxLen == 0 {
