@@ -187,7 +187,7 @@ func TestMonitorRestrictionViolation(t *testing.T) {
 	}
 
 	// Create monitor with all three rules
-	mon, err := monitor.NewMonitor([]*rule.Rule{inRule, ruleA, ruleB})
+	mon, err := monitor.NewMonitor([]*rule.Rule{inRule, ruleA, ruleB}, make(map[string]interface{}))
 	if err != nil {
 		t.Fatalf("Failed to create monitor: %v", err)
 	}
