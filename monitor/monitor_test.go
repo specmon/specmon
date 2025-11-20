@@ -55,11 +55,11 @@ func TestMonitorMultipleFrFacts(t *testing.T) {
 
 	// Retrieve User Settings
 	// factArgMaxLen specifies the maximum length of a fact's arguments before they are truncated in log output.
-	logArgTruncate, _ := cmd.Root().Flags().GetInt64("log-arg-truncate")
+	truncateArgs, _ := cmd.Root().Flags().GetInt64("truncate-args")
 
 	// Define User Settings for Monitor
 	settings := make(map[string]interface{})
-	settings["logArgTruncate"] = logArgTruncate
+	settings["truncateArgs"] = truncateArgs
 
 	// Create monitor with this rule
 	mon, err := monitor.NewMonitor([]*rule.Rule{testRule}, settings)

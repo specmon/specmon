@@ -263,14 +263,14 @@ func truncateString(s string, maxLen int64) string {
 }
 
 //	 LogArgs logs a formatted representation of the fact's name and arguments.
-//		if logArgTruncate is 0 do not print arguments.
-//		if logArgTruncate is -1 print full arg string.
-//		else print max length printed for each arg is logArgTruncate.
+//		if truncateArgs is 0 do not print arguments.
+//		if truncateArgs is -1 print full arg string.
+//		else print max length printed for each arg is truncateArgs.
 func (f *Fact) LogArgs(settings map[string]interface{}) {
 	// retrieve Settings
-	argMaxLen, ok := settings["logArgTruncate"].(int64)
+	argMaxLen, ok := settings["truncateArgs"].(int64)
 	if !ok {
-		panic("Unexpected type for logArgTruncate")
+		panic("Unexpected type for truncateArgs")
 	}
 
 	// check if printing arguments is disabled
