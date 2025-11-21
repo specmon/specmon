@@ -54,10 +54,10 @@ const (
 
 	factPattern = `
     [(linear_fact
-       fact_identifier: (ident) @fact.name
+       fact_identifier: (fact_identifier) @fact.name
        (arguments argument: (_))* @fact.arguments)
      (persistent_fact
-       fact_identifier: (ident) @fact.name
+       fact_identifier: (fact_identifier) @fact.name
        (arguments argument: (_))* @fact.arguments)] @fact`
 
 	macroPattern = `
