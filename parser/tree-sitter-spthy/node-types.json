@@ -4559,7 +4559,7 @@
         "required": true,
         "types": [
           {
-            "type": "ident",
+            "type": "fact_identifier",
             "named": true
           }
         ]
@@ -6133,7 +6133,7 @@
         "required": true,
         "types": [
           {
-            "type": "ident",
+            "type": "fact_identifier",
             "named": true
           }
         ]
@@ -9571,6 +9571,10 @@
   },
   {
     "type": "export_query",
+    "named": true
+  },
+  {
+    "type": "fact_identifier",
     "named": true
   },
   {

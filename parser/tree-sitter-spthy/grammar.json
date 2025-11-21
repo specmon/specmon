@@ -960,8 +960,15 @@
       ]
     },
     "standard_goal_ranking": {
-      "type": "PATTERN",
-      "value": "[CISPcisp][CISPcisp]?[CISPcisp]?[CISPcisp]?"
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": -1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[CISPcisp][CISPcisp]?[CISPcisp]?[CISPcisp]?"
+        }
+      }
     },
     "oracle_goal_ranking": {
       "type": "SEQ",
@@ -1992,13 +1999,8 @@
             "name": "_process"
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "+"
-              }
-            ]
+            "type": "STRING",
+            "value": "+"
           },
           {
             "type": "SYMBOL",
@@ -3217,7 +3219,7 @@
             "name": "fact_identifier",
             "content": {
               "type": "SYMBOL",
-              "name": "ident"
+              "name": "fact_identifier"
             }
           },
           {
@@ -6277,8 +6279,22 @@
       ]
     },
     "ident": {
-      "type": "PATTERN",
-      "value": "[A-Za-z0-9]\\w*"
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[A-Za-z0-9]\\w*"
+      }
+    },
+    "fact_identifier": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[A-Z][A-Za-z0-9_]*"
+        }
+      }
     },
     "param": {
       "type": "PATTERN",
@@ -6394,9 +6410,6 @@
     ],
     [
       "fresh_var"
-    ],
-    [
-      "msg_var_or_nullary_fun"
     ],
     [
       "temporal_var"
