@@ -25,8 +25,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/specmon/specmon/data"
-
 	"github.com/specmon/specmon/monitor"
 	"github.com/spf13/cobra"
 )
@@ -73,7 +71,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	defer eventSource.Close()
 
 	truncateArgs, _ := cmd.Root().Flags().GetInt64("truncate-args")
-	settings := &data.Settings{TruncateArgs: truncateArgs}
+	settings := &monitor.Settings{TruncateArgs: truncateArgs}
 
 	m, err = monitor.NewMonitor(decompRules, settings)
 	if err != nil {

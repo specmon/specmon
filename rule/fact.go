@@ -26,12 +26,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/specmon/specmon/data"
-	"github.com/specmon/specmon/utils"
-
 	log "github.com/sirupsen/logrus"
 
 	"github.com/specmon/specmon/term"
+	"github.com/specmon/specmon/utils"
 )
 
 type FactType string
@@ -260,9 +258,9 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 //		if truncateArgs is 0 do not print arguments.
 //		if truncateArgs is -1 print full arg string.
 //		else print max length printed for each arg is truncateArgs.
-func (f *Fact) LogArgs(settings *data.Settings) {
+func (f *Fact) LogArgs(truncateArgs int64) {
 	// retrieve Settings
-	argMaxLen := settings.TruncateArgs
+	argMaxLen := truncateArgs
 
 	// check if printing arguments is disabled
 	if argMaxLen == 0 {
