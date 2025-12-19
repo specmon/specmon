@@ -1,0 +1,252 @@
+---
+title: Built-in Functions
+description: Reference for SpecMon's built-in functions for data manipulation and formatting
+---
+
+import { Tabs, TabItem, Code, Aside } from '@astrojs/starlight/components';
+
+SpecMon provides built-in functions for data manipulation, formatting, and arithmetic operations within Tamarin specifications. These functions allow you to perform data transformations directly in your protocol rules.
+
+## Data manipulation functions
+
+### `slice(data, start, end)`
+
+Extracts a subsequence from bitstring terms. Essential for manipulating data when pattern matching is not sufficient.
+
+**Parameters:**
+- `data` — The bitstring term to be sliced (byte array, string, or integer)
+- `start` — Starting index (inclusive). Negative values index from the end
+- `end` — Ending index (exclusive). Negative values index from the end. A value of `0` slices to the end
+
+**Examples:**
+
+```tamarin
+// Extract bytes 2-5 from a message
+slice(message, 2, 5)
+
+// Get the last 4 bytes
+slice(data, -4, 0)
+
+// Remove first 2 bytes
+slice(payload, 2, 0)
+
+// Extract middle portion (negative indexing)
+slice(header, 1, -1)
+```
+
+<Aside type="tip">
+The `slice` function handles out-of-bounds indices gracefully by clamping them to valid ranges. If `start >= end`, an empty byte slice is returned.
+</Aside>
+
+### `reverse(data)`
+
+Reverses the byte representation of terms. Useful for handling endianness conversion between little-endian (SpecMon's default) and big-endian.
+
+**Parameters:**
+- `data` — The term to be reversed (constant of type `int`, `string`, or `[]byte`)
+
+**Examples:**
+
+```tamarin
+// Convert integer from little-endian to big-endian
+reverse(counter)
+
+// Reverse byte order in a hash
+reverse(hash_value)
+
+// Reverse string bytes
+reverse('hello')
+```
+
+**Use cases:**
+- Converting between different endianness formats
+- Implementing protocol-specific byte order requirements
+- Data encoding transformations
+
+## Format functions
+
+### `cat(...formats)`
+
+Concatenates multiple format fields into a single byte sequence. The primary function for building structured data from individual fields.
+
+**Parameters:**
+- `...formats` — Variable number of format functions (`byte()`, `int()`, `string()`)
+
+**Examples:**
+
+```tamarin
+// Build a protocol message
+cat(
+    byte(0x01),              // Message type
+    int(length, 4),          // Length field (4 bytes)
+    byte(payload),           // Variable payload
+    byte(checksum, 2)        // 2-byte checksum
+)
+
+// Protocol with fixed-length string field
+cat(
+    string(username, 16),    // 16-byte username field
+    int(user_id, 4),         // 4-byte user ID
+    string(data)             // Variable-length data (last field)
+)
+
+// Create a simple header
+cat(byte(version, 1), int(sequence_number, 8))
+```
+
+See [Encoding Message Formats](/specifications/message-formats/) for detailed format string patterns.
+
+### Format field functions
+
+#### `byte(data, [length])`
+
+Formats data as raw bytes.
+
+**Parameters:**
+- `data` — The data to format (variable or constant)
+- `length` (optional) — Fixed length in bytes. If omitted, uses the natural length of the data
+
+**Usage notes:**
+- Length can be omitted when constructing messages from known values
+- Length is required for pattern matching/parsing when the byte field is not the final field
+- When length is specified, data will be truncated or zero-padded to fit
+
+#### `int(data, [length])`
+
+Formats integers with specified byte length.
+
+**Parameters:**
+- `data` — The integer data (variable or constant)
+- `length` (optional) — Number of bytes for the integer representation
+
+**Usage notes:**
+- Length can be omitted when constructing messages from known values
+- Length is required for pattern matching/parsing when the int field is not the final field
+- When length is specified, integers are represented in little-endian format
+
+#### `string(data, [length])`
+
+Formats string data as UTF-8 bytes.
+
+**Parameters:**
+- `data` — The string data (variable or constant)
+- `length` (optional) — Number of bytes for the string representation
+
+**Usage notes:**
+- Length can be omitted when constructing messages from known values
+- Length is required for pattern matching/parsing when the string field is not the final field
+- When length is specified, strings will be truncated or null-padded to fit
+
+## Arithmetic functions
+
+### `add(a, b)`
+
+Performs integer addition.
+
+**Parameters:**
+- `a`, `b` — Integer values (constants or variables)
+
+**Example:**
+```tamarin
+add(counter, 1)
+```
+
+### `and(a, b)` 
+
+Performs bitwise AND operation on integers.
+
+**Parameters:**
+- `a`, `b` — Integer or byte values
+
+**Examples:**
+
+```tamarin
+// Extract specific bits
+and(flags, 0x0F)        // Keep only lower 4 bits
+
+// Mask operation on bytes
+and(data_byte, 0xFF)    // Ensure single byte
+
+// Combine with other operations
+byte(and(version_flags, 0x7F), 1)
+```
+
+### `or(a, b)`
+
+Performs bitwise OR operation.
+
+**Parameters:**
+- `a`, `b` — Integer or byte values
+
+**Examples:**
+
+```tamarin
+// Set specific bits
+or(flags, 0x80)         // Set high bit
+
+// Combine bit fields
+or(version, or(flags, type))
+
+// Complex bit manipulation
+or(and(upper_bits, 0xF0), and(lower_bits, 0x0F))
+```
+
+## Function composition
+
+Built-in functions can be composed together to create complex data transformations:
+
+<Tabs>
+<TabItem label="Key Extraction">
+
+```tamarin
+// Extract and manipulate handshake data
+rule ProcessHandshake:
+  let
+    // Extract timestamp (last 8 bytes, reverse for big-endian fields)
+    timestamp = reverse(slice(handshake_msg, -8, 0))
+    
+    // Extract ephemeral key (32 bytes starting at offset 8)
+    ephemeral = slice(handshake_msg, 8, 40)
+    
+    // Build response message
+    response = cat(
+        byte(0x02),                    // Response type
+        int(timestamp, 8),             // Echo timestamp
+        byte(ephemeral),               // Include ephemeral key
+        byte(and(flags, 0x7F), 1)      // Masked flags
+    )
+  in
+  [ State(~sk, pk), In(handshake_msg) ]
+  -->
+  [ Out(response), NextState(~sk, ephemeral) ]
+```
+
+</TabItem>
+
+<TabItem label="Header Parsing">
+
+```tamarin
+// Parse complex protocol header
+rule ParseMessage:
+  let
+    // Extract version (first byte, mask lower 4 bits)
+    version = and(slice(header, 0, 1), 0x0F)
+    
+    // Extract flags (first byte, upper 4 bits)
+    flags = and(slice(header, 0, 1), 0xF0)
+    
+    // Extract length field (bytes 1-3, big-endian field)
+    length = reverse(slice(header, 1, 4))
+    
+    // Build normalized header
+    norm_header = cat(
+        byte(or(version, 0x40)),       // Set version with compat bit
+        int(add(length, 4), 3),        // Adjust length
+        byte(slice(header, 4, 0))      // Rest of header
+    )
+  in
+  [ In(header) ] -->  [ ProcessedHeader(norm_header) ]
+```
+
+</TabItem>
+</Tabs>
