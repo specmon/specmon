@@ -1,0 +1,45 @@
+@layer base, starlight, theme, components, utilities;
+
+@import '@astrojs/starlight-tailwind';
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+/*
+Add additional Tailwind styles to this file:
+https://tailwindcss.com/docs/adding-custom-styles#using-custom-css
+*/
+
+:root {
+	--sl-content-width: 70rem; /* Adjusted content width */
+}
+
+.diagram .code {
+  line-height: 1 !important;
+}
+
+body {
+	font-size: 1.25rem;
+}
+
+/* GitHub-style links with thicker underline - only in doc prose content, not custom sections */
+article.content p a,
+article.content li a,
+article.content td a,
+.sl-markdown-content > p a,
+.sl-markdown-content > ul a,
+.sl-markdown-content > ol a {
+	text-decoration: underline;
+	text-decoration-color: var(--sl-color-text-accent);
+	text-underline-offset: 0.25em;
+	text-decoration-thickness: 2px;
+	transition: text-decoration-color 0.15s ease-in-out;
+}
+
+article.content p a:hover,
+article.content li a:hover,
+article.content td a:hover,
+.sl-markdown-content > p a:hover,
+.sl-markdown-content > ul a:hover,
+.sl-markdown-content > ol a:hover {
+	text-decoration-color: currentColor;
+}

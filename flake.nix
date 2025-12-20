@@ -17,6 +17,8 @@
 	  pkgs.gotools
 	  pkgs.gopls
 	  pkgs.golangci-lint
+	  pkgs.nodejs
+	  pkgs.pnpm
         ];
       };
     });

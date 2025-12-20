@@ -1,0 +1,71 @@
+---
+import Pagination from '@astrojs/starlight/components/Pagination.astro';
+import SocialIcons from '@astrojs/starlight/components/SocialIcons.astro';
+const navSections = [
+  {
+    label: 'Getting Started',
+    items: [
+      { label: 'What is SpecMon?', href: '/' },
+      { label: 'Installation', href: '/getting-started/installation/' },
+      { label: 'Quick Start', href: '/getting-started/quick-start/' },
+    ],
+  },
+  {
+    label: 'Writing Specifications',
+    items: [
+      { label: 'Specification Basics', href: '/specifications/basics/' },
+      { label: 'SpecMon Annotations', href: '/specifications/annotations/' },
+      { label: 'Creating Unified Models', href: '/specifications/unified-models/' },
+      { label: 'Encoding Message Formats', href: '/specifications/message-formats/' },
+      { label: 'Event Rewriting', href: '/specifications/rewriting/' },
+    ],
+  },
+  {
+    label: 'Reference',
+    items: [
+      { label: 'Event Format', href: '/reference/event-format/' },
+      { label: 'Built-in Functions', href: '/reference/built-in-functions/' },
+      { label: 'CLI Commands', href: '/reference/cli/' },
+    ],
+  },
+];
+---
+
+<Pagination />
+
+<footer class="border-t border-gray-200 dark:border-gray-800 px-(--sl-content-pad-x) py-12 mt-8">
+  <div class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-[1fr_3fr] gap-12">
+    <div class="flex flex-col gap-2">
+      <p class="text-xl font-semibold text-gray-900 dark:text-white m-0">SpecMon</p>
+      <p class="text-sm text-gray-600 dark:text-gray-400 m-0">© 2025 CISPA</p>
+      <p class="text-sm text-gray-600 dark:text-gray-400 m-0">Licensed under AGPL-3.0</p>
+    </div>
+
+    <nav class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+      {navSections.map((section) => (
+        <div>
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white mb-4">{section.label}</h3>
+          <ul class="list-none p-0 m-0 flex flex-col gap-2">
+            {section.items.map((entry) => (
+              <li><a href={entry.href} class="text-sm text-gray-600 dark:text-gray-400 no-underline hover:text-gray-900 dark:hover:text-white transition-colors">{entry.label}</a></li>
+            ))}
+          </ul>
+        </div>
+      ))}
+
+      <div>
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-white mb-4">Community</h3>
+        <ul class="list-none p-0 m-0 flex flex-col gap-2">
+          <li><a href="https://github.com/specmon/specmon/blob/main/CONTRIBUTING.md" class="text-sm text-gray-600 dark:text-gray-400 no-underline hover:text-gray-900 dark:hover:text-white transition-colors">Contributing</a></li>
+          <li><a href="https://github.com/specmon/specmon/issues" class="text-sm text-gray-600 dark:text-gray-400 no-underline hover:text-gray-900 dark:hover:text-white transition-colors">Issues</a></li>
+          <li><a href="https://github.com/specmon/specmon/discussions" class="text-sm text-gray-600 dark:text-gray-400 no-underline hover:text-gray-900 dark:hover:text-white transition-colors">Discussions</a></li>
+          <li><a href="/privacy/" class="text-sm text-gray-600 dark:text-gray-400 no-underline hover:text-gray-900 dark:hover:text-white transition-colors">Privacy Policy</a></li>
+        </ul>
+        
+        <div class="mt-6">
+          <SocialIcons {...Astro.props} />
+        </div>
+      </div>
+    </nav>
+  </div>
+</footer>
