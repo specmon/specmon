@@ -41,16 +41,6 @@ const (
 
 // RootConfig is the configuration of the root command.
 type RootConfig struct {
-<<<<<<< Updated upstream
-	Verbose        bool   `flag:"verbose"          short:"v" desc:"verbose output"`
-	Quiet          bool   `flag:"quiet"            short:"q" desc:"quiet output"`
-	Decompose      bool   `flag:"decompose"        short:"d" desc:"decompose rules"`
-	LogLevel       string `flag:"log-level"        short:"l" desc:"log level"`
-	Role           string `flag:"role"             short:"r" desc:"role"`
-	SpecPath       string `flag:"spec-path"        short:"s" desc:"specification path"`
-	CPUProfilePath string `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
-	MemProfilePath string `flag:"mem-profile-path" short:"m" desc:"memory profile path"`
-=======
 	Verbose        bool     `flag:"verbose"          short:"v" desc:"verbose output"`
 	Quiet          bool     `flag:"quiet"            short:"q" desc:"quiet output"`
 	Decompose      bool     `flag:"decompose"        short:"d" desc:"decompose rules"`
@@ -61,7 +51,6 @@ type RootConfig struct {
 	SpecPath       string   `flag:"spec-path"        short:"s" desc:"specification path"`
 	CPUProfilePath string   `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
 	MemProfilePath string   `flag:"mem-profile-path" short:"m" desc:"memory profile path"`
->>>>>>> Stashed changes
 }
 
 // DefaultRootConfig returns the default configuration of the root command.
@@ -96,7 +85,15 @@ func (c *RootConfig) RunE() error {
 	}
 	fmt.Println()
 
-	order, grouped := groupDecomposedRules(selectedRules, decompRules)
+	order, grouped := groupDecomposedRules(selectedRules, d
+		order = []string{c.RuleFilter}
+	}
+	if c.Verbose {
+		if c.RuleFilter != "" && len(grouped[c.RuleFilter]) == 0 {
+			return fmt.Errorf("no rules found for base name %q", c.RuleFilter)
+		}
+		for i, base := range order {
+			group := grouped[base]ecompRules)
 	if c.RuleFilter != "" {
 		order = []string{c.RuleFilter}
 	}

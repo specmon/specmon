@@ -67,11 +67,8 @@ func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	role, _ := cmd.Root().Flags().GetString("role")
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
-<<<<<<< Updated upstream
-=======
 	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 	verbose, _ := cmd.Root().Flags().GetBool("verbose")
->>>>>>> Stashed changes
 
 	_, _, decompRules, err := ProcessRules(specPath, role, decompose)
 	if err != nil {
@@ -84,8 +81,6 @@ func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 	defer eventSource.Close()
 
-<<<<<<< Updated upstream
-=======
 	// Create the main monitor
 	m, err = monitor.NewMonitor(decompRules)
 	if err != nil {
@@ -147,7 +142,6 @@ func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 
 	// No rewrite: use original logic with MultiReader for pre-trace
->>>>>>> Stashed changes
 	source := io.Reader(eventSource)
 
 	if r.PreTrace != "" {
