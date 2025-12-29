@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/fatih/color"
+	"github.com/specmon/specmon/rule"
 	"github.com/specmon/specmon/utils"
 	"github.com/spf13/cobra"
 )
@@ -44,6 +46,7 @@ type RootConfig struct {
 	Decompose      bool     `flag:"decompose"        short:"d" desc:"decompose rules"`
 	LogLevel       string   `flag:"log-level"        short:"l" desc:"log level"`
 	Role           string   `flag:"role"             short:"r" desc:"role"`
+	RuleFilter     string   `flag:"rule"                       desc:"show only rules from the given base rule name"`
 	Defines        []string `flag:"defines"          short:"D" desc:"define preprocessor variables"`
 	SpecPath       string   `flag:"spec-path"        short:"s" desc:"specification path"`
 	CPUProfilePath string   `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
@@ -82,11 +85,131 @@ func (c *RootConfig) RunE() error {
 	}
 	fmt.Println()
 
-	for _, r := range decompRules {
-		fmt.Println(utils.Indent(r.String(), 2))
+	order, grouped := groupDecomposedRules(selectedRules, decompRules)
+	if c.RuleFilter != "" {
+		order = []string{c.RuleFilter}
+	}
+	if c.Verbose {
+		if c.RuleFilter != "" && len(grouped[c.RuleFilter]) == 0 {
+			return fmt.Errorf("no rules found for base name %q", c.RuleFilter)
+		}
+		for i, base := range order {
+			group := grouped[base]
+			if len(group) == 0 {
+				continue
+			}
+
+			fmt.Printf("=== %s (%d %s) ===\n\n", ruleColor(i).Sprint(base), len(group), utils.Pluralize("rule", len(group)))
+			for _, r := range group {
+				fmt.Println(utils.Indent(colorizeRuleString(r.String(), ruleColor(i)), 2))
+				fmt.Println()
+			}
+		}
+	} else {
+		if c.RuleFilter != "" && len(grouped[c.RuleFilter]) == 0 {
+			return fmt.Errorf("no rules found for base name %q", c.RuleFilter)
+		}
+		fmt.Println("Rules:")
+		maxLen := 0
+		for _, base := range order {
+			if len(base) > maxLen {
+				maxLen = len(base)
+			}
+		}
+		for i, base := range order {
+			group := grouped[base]
+			if len(group) == 0 {
+				continue
+			}
+			fmt.Printf("  %-*s : %d %s\n", maxLen, ruleColor(i).Sprint(base), len(group), utils.Pluralize("rule", len(group)))
+		}
+		fmt.Println("\nUse --verbose or -v for detailed rule listing")
 	}
 
 	return nil
+}
+
+func groupDecomposedRules(baseRules []*rule.Rule, decompRules []*rule.Rule) ([]string, map[string][]*rule.Rule) {
+	baseNames := make([]string, 0, len(baseRules))
+	baseSet := make(map[string]struct{}, len(baseRules))
+	for _, r := range baseRules {
+		baseNames = append(baseNames, r.Name)
+		baseSet[r.Name] = struct{}{}
+	}
+
+	order := append([]string{}, baseNames...)
+	orderSet := make(map[string]struct{}, len(baseNames))
+	for _, name := range baseNames {
+		orderSet[name] = struct{}{}
+	}
+
+	grouped := make(map[string][]*rule.Rule)
+	for _, r := range decompRules {
+		base := findBaseName(r.Name, baseNames)
+		if base == "" {
+			base = r.Name
+		}
+
+		grouped[base] = append(grouped[base], r)
+		if _, ok := orderSet[base]; !ok {
+			order = append(order, base)
+			orderSet[base] = struct{}{}
+		}
+	}
+
+	return order, grouped
+}
+
+func findBaseName(ruleName string, baseNames []string) string {
+	best := ""
+	for _, base := range baseNames {
+		if ruleName == base || strings.HasPrefix(ruleName, base+rule.ComponentSep) {
+			if len(base) > len(best) {
+				best = base
+			}
+		}
+	}
+
+	return best
+}
+
+func ruleColor(index int) *color.Color {
+	palette := []color.Attribute{
+		color.FgCyan,
+		color.FgGreen,
+		color.FgYellow,
+		color.FgMagenta,
+		color.FgBlue,
+		color.FgRed,
+	}
+	if color.NoColor || len(palette) == 0 {
+		return color.New()
+	}
+	return color.New(palette[index%len(palette)])
+}
+
+func colorizeRuleString(ruleStr string, c *color.Color) string {
+	if c == nil || color.NoColor {
+		return ruleStr
+	}
+
+	lines := strings.Split(ruleStr, "\n")
+	if len(lines) == 0 {
+		return ruleStr
+	}
+
+	const prefix = "rule "
+	if strings.HasPrefix(lines[0], prefix) {
+		rest := strings.TrimPrefix(lines[0], prefix)
+		nameEnd := len(rest)
+		if idx := strings.IndexAny(rest, "[:"); idx != -1 {
+			nameEnd = idx
+		}
+		name := rest[:nameEnd]
+		lines[0] = prefix + c.Sprint(name) + rest[nameEnd:]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // PersistentPreRunE is the pre-run hook for the root command.
