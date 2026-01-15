@@ -3,7 +3,7 @@ package parser
 import (
 	"bytes"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // Preprocessor holds the state for the preprocessing pass.
@@ -33,7 +33,7 @@ func (p *Preprocessor) Run(root *sitter.Node) []byte {
 
 // walk traverses the AST and writes the processed source to the buffer.
 func (p *Preprocessor) walk(node *sitter.Node, out *bytes.Buffer) {
-	nodeType := node.Type()
+	nodeType := node.Kind()
 
 	if nodeType == "preprocessor" {
 		// The preprocessor node itself doesn't have content, but it has a child
@@ -52,7 +52,7 @@ func (p *Preprocessor) walk(node *sitter.Node, out *bytes.Buffer) {
 		// any whitespace between children by tracking byte positions
 		lastEndByte := node.StartByte()
 
-		for i := 0; i < int(node.ChildCount()); i++ {
+		for i := uint(0); i < node.ChildCount(); i++ {
 			child := node.Child(i)
 
 			// Copy any whitespace/content between the last child and this one
@@ -74,7 +74,7 @@ func (p *Preprocessor) walk(node *sitter.Node, out *bytes.Buffer) {
 
 // handlePreprocessor evaluates a preprocessor directive.
 func (p *Preprocessor) handlePreprocessor(node *sitter.Node, out *bytes.Buffer) {
-	if node.Type() == "ifdef" {
+	if node.Kind() == "ifdef" {
 		// Use field-based access instead of child indices
 		conditionNode := node.ChildByFieldName("condition")
 
@@ -82,7 +82,7 @@ func (p *Preprocessor) handlePreprocessor(node *sitter.Node, out *bytes.Buffer) 
 			return // No condition found
 		}
 
-		condition := conditionNode.Content(p.source)
+		condition := conditionNode.Utf8Text(p.source)
 		if p.defines[condition] {
 			// Condition is true, process all 'consequence' nodes
 			consequenceNodes := childrenByFieldName(node, "consequence")
