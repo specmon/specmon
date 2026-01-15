@@ -1,11 +1,20 @@
-# SpecMon
+<h1 align="center">
+  <img src="logo.png" alt="SpecMon Logo" width="48" height="48" style="vertical-align: middle;">
+  <span style="vertical-align: middle;">SpecMon</span>
+</h1>
 
 <p align="center">
-  <img src="logo.png" alt="SpecMon Logo" width="150">
+  <b>Verify. Monitor. Trust.</b>
 </p>
 
 <p align="center">
-  <b>Runtime monitoring of formal specifications</b>
+  Runtime monitoring of formal specifications that bridges verification and implementation.
+</p>
+
+<p align="center">
+  <a href="https://docs.specmon.io">
+    <img src="https://img.shields.io/badge/docs-specmon.io-0ea5e9?style=for-the-badge" alt="Documentation">
+  </a>
 </p>
 
 <p align="center">
@@ -24,12 +33,13 @@
 
 ## 🎯 About
 
-SpecMon ensures that real-world systems comply with their formal specifications by monitoring applications at runtime. It tracks application behavior through event streams and verifies compliance with the defined rules. SpecMon is lightweight, capable of handling complex scenarios, and supports multiple concurrent sessions.
+SpecMon is a runtime monitor that uses your formal specifications directly, including Tamarin multiset-rewrite rules. It tracks application behavior through event streams and verifies compliance with the defined rules. SpecMon is lightweight, capable of handling complex scenarios, and supports multiple concurrent sessions. Learn more at [specmon.io](https://specmon.io).
 
 ---
 
 ## ✨ Features
 
+- **Specification-Native**: Use existing Tamarin multiset-rewrite rules without reauthoring.
 - **Flexible Architecture**: Choose your preferred event aggregation method.
 - **Multi-Session Monitoring**: Seamlessly handle multiple concurrent sessions.
 - **Debugging Made Easy**: Quickly identify and fix errors with clear debug output.
@@ -64,7 +74,7 @@ SpecMon ensures that real-world systems comply with their formal specifications 
 
 ## 🚀 Usage
 
-*Note: Detailed documentation and examples will be linked here soon.*
+Detailed documentation and a quick start guide live at [docs.specmon.io](https://docs.specmon.io), including [Quick Start](https://docs.specmon.io/getting-started/quick-start/).
 
 
    ```bash
@@ -123,4 +133,3 @@ If you use SpecMon in your research or projects, please cite it as follows:
   year={2024}
 }
 ```
-
