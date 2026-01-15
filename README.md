@@ -1,14 +1,17 @@
 <h1 align="center">
-  <img src="logo.png" alt="SpecMon Logo" width="48" height="48" style="vertical-align: middle;">
-  <span style="vertical-align: middle;">SpecMon</span>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/specmon-with-text-light.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/branding/specmon-with-text-dark.svg">
+    <img alt="SpecMon" src="assets/branding/specmon-with-text-dark.svg" width="320" height="65">
+  </picture>
 </h1>
 
-<p align="center">
-  <b>Verify. Monitor. Trust.</b>
-</p>
+<h3 align="center">Verify. Monitor. Trust.</h3>
 
 <p align="center">
-  Runtime monitoring of formal specifications that bridges verification and implementation.
+  The runtime monitor that uses your formal specifications directly.
+  <br />
+  What you verify is what you enforce.
 </p>
 
 <p align="center">
