@@ -26,7 +26,7 @@ import "C"
 import (
 	"unsafe"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 func GetLanguage() *sitter.Language {
