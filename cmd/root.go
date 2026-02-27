@@ -30,9 +30,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is the version of the application.
+// Set at build time via -ldflags by GoReleaser. Dev builds default to "dev".
+var Version = "dev"
+
 const (
-	// Version is the version of the application.
-	Version = "0.1.0"
 	// Name is the name of the executable.
 	Name = "specmon"
 )
