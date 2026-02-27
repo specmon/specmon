@@ -6,7 +6,8 @@
     ".": {
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
-      "tag-name": "v${version}"
+      "tag-name": "v${version}",
+      "bump-minor-pre-major": true
     }
   }
 }
