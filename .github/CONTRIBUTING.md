@@ -88,7 +88,7 @@ SpecMon uses [Release Please](https://github.com/googleapis/release-please) and
   Release Please determines the next version automatically:
   - `fix:` → patch (0.1.0 → 0.1.1)
   - `feat:` → minor (0.1.0 → 0.2.0)
-  - `feat!:` or `BREAKING CHANGE:` footer → major (0.1.0 → 1.0.0)
+  - `feat!:` or `BREAKING CHANGE:` → minor while version < 1.0.0; major once ≥ 1.0.0
 - Review the Release PR's `CHANGELOG.md` diff before merging.
 - After the release is published, merge `develop → main` to update the stable branch.
 
