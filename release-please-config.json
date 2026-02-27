@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "release-type": "simple",
   "target-branch": "develop",
+  "pull-request-title-pattern": "chore${scope}${component}: Release ${version}",
   "packages": {
     ".": {
       "changelog-path": "CHANGELOG.md",
