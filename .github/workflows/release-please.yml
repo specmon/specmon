@@ -9,6 +9,11 @@ on:
   push:
     branches:
       - develop
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to build and release (e.g. v0.2.0)'
+        required: true
 
 permissions:
   contents: write
@@ -29,14 +34,14 @@ jobs:
 
   goreleaser:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    if: ${{ needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: macos-14
     steps:
       - name: Check out code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ github.event.inputs.tag_name || needs.release-please.outputs.tag_name }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
