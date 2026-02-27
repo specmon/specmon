@@ -1,5 +1,5 @@
 {
-  description = "Typst Environment";
+  description = "SpecMon development environment";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs";
   inputs.flake-utils.url = "github:numtide/flake-utils";
