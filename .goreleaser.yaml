@@ -1,0 +1,58 @@
+# GoReleaser configuration for SpecMon.
+# See: https://goreleaser.com/customization/
+version: 2
+
+project_name: specmon
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: specmon
+    main: .
+    binary: specmon
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target x86_64-linux-musl
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target aarch64-linux-musl
+    ldflags:
+      - -s -w
+      - -X github.com/specmon/specmon/cmd.Version={{.Version}}
+
+archives:
+  - id: specmon
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  # Release Please manages CHANGELOG.md. Disable GoReleaser's own generation.
+  disable: true
+
+release:
+  draft: false
+  prerelease: auto
