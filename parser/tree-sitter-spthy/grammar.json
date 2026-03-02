@@ -1,4 +1,5 @@
 {
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "spthy",
   "word": "ident",
   "rules": {
@@ -119,14 +120,22 @@
           "value": "#ifdef"
         },
         {
-          "type": "SYMBOL",
-          "name": "_ifdef_formula"
-        },
-        {
-          "type": "REPEAT",
+          "type": "FIELD",
+          "name": "condition",
           "content": {
             "type": "SYMBOL",
-            "name": "_body_item"
+            "name": "_ifdef_formula"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "consequence",
+          "content": {
+            "type": "REPEAT",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_body_item"
+            }
           }
         },
         {
@@ -140,10 +149,14 @@
                   "value": "#else"
                 },
                 {
-                  "type": "REPEAT",
+                  "type": "FIELD",
+                  "name": "alternative",
                   "content": {
-                    "type": "SYMBOL",
-                    "name": "_body_item"
+                    "type": "REPEAT",
+                    "content": {
+                      "type": "SYMBOL",
+                      "name": "_body_item"
+                    }
                   }
                 }
               ]
@@ -947,8 +960,15 @@
       ]
     },
     "standard_goal_ranking": {
-      "type": "PATTERN",
-      "value": "[CISPcisp][CISPcisp]?[CISPcisp]?[CISPcisp]?"
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": -1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[CISPcisp][CISPcisp]?[CISPcisp]?[CISPcisp]?"
+        }
+      }
     },
     "oracle_goal_ranking": {
       "type": "SEQ",
@@ -1979,13 +1999,8 @@
             "name": "_process"
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "+"
-              }
-            ]
+            "type": "STRING",
+            "value": "+"
           },
           {
             "type": "SYMBOL",
@@ -2815,6 +2830,10 @@
               "value": "role="
             },
             {
+              "type": "STRING",
+              "value": "\""
+            },
+            {
               "type": "FIELD",
               "name": "role",
               "content": {
@@ -2830,6 +2849,10 @@
                   }
                 ]
               }
+            },
+            {
+              "type": "STRING",
+              "value": "\""
             }
           ]
         },
@@ -3196,7 +3219,7 @@
             "name": "fact_identifier",
             "content": {
               "type": "SYMBOL",
-              "name": "ident"
+              "name": "fact_identifier"
             }
           },
           {
@@ -6256,8 +6279,22 @@
       ]
     },
     "ident": {
-      "type": "PATTERN",
-      "value": "[A-Za-z0-9][\\w\\.]*"
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "[A-Za-z0-9]\\w*"
+      }
+    },
+    "fact_identifier": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[A-Z][A-Za-z0-9_]*"
+        }
+      }
     },
     "param": {
       "type": "PATTERN",
@@ -6373,9 +6410,6 @@
     ],
     [
       "fresh_var"
-    ],
-    [
-      "msg_var_or_nullary_fun"
     ],
     [
       "temporal_var"
@@ -6533,6 +6567,6 @@
     }
   ],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "reserved": {}
 }
-

@@ -30,23 +30,26 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is the version of the application.
+// Set at build time via -ldflags by GoReleaser. Dev builds default to "dev".
+var Version = "dev"
+
 const (
-	// Version is the version of the application.
-	Version = "0.1.0"
 	// Name is the name of the executable.
 	Name = "specmon"
 )
 
 // RootConfig is the configuration of the root command.
 type RootConfig struct {
-	Verbose        bool   `flag:"verbose"          short:"v" desc:"verbose output"`
-	Quiet          bool   `flag:"quiet"            short:"q" desc:"quiet output"`
-	Decompose      bool   `flag:"decompose"        short:"d" desc:"decompose rules"`
-	LogLevel       string `flag:"log-level"        short:"l" desc:"log level"`
-	Role           string `flag:"role"             short:"r" desc:"role"`
-	SpecPath       string `flag:"spec-path"        short:"s" desc:"specification path"`
-	CPUProfilePath string `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
-	MemProfilePath string `flag:"mem-profile-path" short:"m" desc:"memory profile path"`
+	Verbose        bool     `flag:"verbose"          short:"v" desc:"verbose output"`
+	Quiet          bool     `flag:"quiet"            short:"q" desc:"quiet output"`
+	Decompose      bool     `flag:"decompose"        short:"d" desc:"decompose rules"`
+	LogLevel       string   `flag:"log-level"        short:"l" desc:"log level"`
+	Role           string   `flag:"role"             short:"r" desc:"role"`
+	Defines        []string `flag:"defines"          short:"D" desc:"define preprocessor variables"`
+	SpecPath       string   `flag:"spec-path"        short:"s" desc:"specification path"`
+	CPUProfilePath string   `flag:"cpu-profile-path" short:"c" desc:"cpu profile path"`
+	MemProfilePath string   `flag:"mem-profile-path" short:"m" desc:"memory profile path"`
 }
 
 // DefaultRootConfig returns the default configuration of the root command.
@@ -61,7 +64,7 @@ func DefaultRootConfig() *RootConfig {
 // The command parses a specification, and if requested,
 // performs a filtering and decomposition of the rules.
 func (c *RootConfig) RunE() error {
-	rules, selectedRules, decompRules, err := ProcessRules(c.SpecPath, c.Role, c.Decompose)
+	rules, selectedRules, decompRules, err := ProcessRules(c.SpecPath, c.Role, c.Decompose, c.Defines)
 	if err != nil {
 		return err
 	}
@@ -209,6 +212,7 @@ func Root() *cobra.Command {
 	rootCmd := NewRootCmd()
 	rootCmd.AddCommand(
 		NewMonitorCmd(),
+		NewRewriteCmd(),
 	)
 
 	return rootCmd

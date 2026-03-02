@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 
 	spthy "github.com/specmon/specmon/parser/tree-sitter-spthy"
 	"github.com/specmon/specmon/rule"
@@ -54,10 +54,10 @@ const (
 
 	factPattern = `
     [(linear_fact
-       fact_identifier: (ident) @fact.name
+       fact_identifier: (fact_identifier) @fact.name
        (arguments argument: (_))* @fact.arguments)
      (persistent_fact
-       fact_identifier: (ident) @fact.name
+       fact_identifier: (fact_identifier) @fact.name
        (arguments argument: (_))* @fact.arguments)] @fact`
 
 	macroPattern = `
@@ -102,18 +102,19 @@ func (e *ParseError) Unwrap() error {
 func childrenByFieldName(node *sitter.Node, fieldName string) []*sitter.Node {
 	var results []*sitter.Node
 
-	cursor := sitter.NewTreeCursor(node)
-	cursor.GoToFirstChild()
-	done := false
-	for !done {
-		for cursor.CurrentFieldName() != fieldName {
-			if !cursor.GoToNextSibling() {
-				return results
-			}
+	cursor := node.Walk()
+	defer cursor.Close()
+
+	if !cursor.GotoFirstChild() {
+		return results
+	}
+
+	for {
+		if cursor.FieldName() == fieldName {
+			results = append(results, cursor.Node())
 		}
-		results = append(results, cursor.CurrentNode())
-		if !cursor.GoToNextSibling() {
-			done = true
+		if !cursor.GotoNextSibling() {
+			break
 		}
 	}
 
@@ -122,8 +123,14 @@ func childrenByFieldName(node *sitter.Node, fieldName string) []*sitter.Node {
 
 func getCaptureMap(q *sitter.Query, m *sitter.QueryMatch) map[string]*sitter.Node {
 	captures := make(map[string]*sitter.Node)
+	captureNames := q.CaptureNames()
 	for _, c := range m.Captures {
-		captures[q.CaptureNameForId(c.Index)] = c.Node
+		index := int(c.Index)
+		if index >= len(captureNames) {
+			continue
+		}
+		node := c.Node
+		captures[captureNames[index]] = &node
 	}
 
 	return captures
@@ -136,28 +143,31 @@ func (p *Parser) errorNodeToError(node *sitter.Node) error {
 
 	// TODO: node.HasError also returns true if a subnode is missing or extra.
 	// In this case, the error pattern failes to match.
-	query, err := sitter.NewQuery([]byte(errorPattern), p.lang)
+	query, err := sitter.NewQuery(p.lang, errorPattern)
 	if err != nil {
 		return &ParseError{p, err}
 	}
+	defer query.Close()
 
 	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, node)
+	defer queryCursor.Close()
 
-	m, ok := queryCursor.NextMatch()
-	if !ok {
+	matches := queryCursor.Matches(query, node, p.src)
+	m := matches.Next()
+	if m == nil {
 		return &ParseError{p, errors.New("cannot match error pattern")}
 	}
 
 	captures := getCaptureMap(query, m)
 	if errorNode, ok := captures["error"]; ok {
-		errorLine := int(errorNode.StartPoint().Row + 1)
-		errorColumn := int(errorNode.StartPoint().Column + 1)
+		start := errorNode.StartPosition()
+		errorLine := start.Row + 1
+		errorColumn := start.Column + 1
 
 		srcLines := strings.Split(string(p.src), "\n")
 
-		beforeContextLine := max(0, errorLine-errorContextBeforeOffset-1)
-		afterContextLine := min(len(srcLines), errorLine+errorContextAfterOffset)
+		beforeContextLine := max(0, int(errorLine)-errorContextBeforeOffset-1)         //nolint:gosec
+		afterContextLine := min(len(srcLines), int(errorLine)+errorContextAfterOffset) //nolint:gosec
 
 		errorContext := srcLines[beforeContextLine:afterContextLine]
 
@@ -170,12 +180,12 @@ func (p *Parser) errorNodeToError(node *sitter.Node) error {
 }
 
 func (p *Parser) parseTerm(c *sitter.Node) term.Term {
-	switch c.Type() {
+	switch c.Kind() {
 	case "msg_var_or_nullary_fun", "pub_var", "fresh_var":
 		ident := c.ChildByFieldName("variable_identifier")
 		if ident != nil {
-			v := ident.Content(p.src)
-			if c.Type() == "pub_var" {
+			v := ident.Utf8Text(p.src)
+			if c.Kind() == "pub_var" {
 				v = term.PublicPrefix + v
 			}
 
@@ -185,20 +195,20 @@ func (p *Parser) parseTerm(c *sitter.Node) term.Term {
 		// The parser doesn't distinguish between a constant number literal
 		// and a variable. Hence, we need to try to parse the number as an interger.
 		ident := c.ChildByFieldName("variable_identifier")
-		if i, err := strconv.Atoi(ident.Content(p.src)); err == nil {
+		if i, err := strconv.Atoi(ident.Utf8Text(p.src)); err == nil {
 			return term.NewConstant[int](i)
 		}
 
-		return term.NewVariable(ident.Content(p.src))
+		return term.NewVariable(ident.Utf8Text(p.src))
 	case "pub_name":
 		return p.parsePubName(c)
 	case "nary_app", "nullary_fun":
 		ident := c.ChildByFieldName("function_identifier")
 		args := []term.Term{}
 		if ident != nil {
-			for i := uint32(0); i < c.ChildCount(); i++ {
-				child := c.Child(int(i))
-				if child.Type() == "arguments" {
+			for i := uint(0); i < c.ChildCount(); i++ {
+				child := c.Child(i)
+				if child.Kind() == "arguments" {
 					arguments := childrenByFieldName(child, "argument")
 					for _, arg := range arguments {
 						args = append(args, p.parseTerm(arg))
@@ -206,7 +216,7 @@ func (p *Parser) parseTerm(c *sitter.Node) term.Term {
 				}
 			}
 
-			return term.NewFunction(ident.Content(p.src), args)
+			return term.NewFunction(ident.Utf8Text(p.src), args)
 		}
 	case "tuple_term":
 		termNodes := childrenByFieldName(c, "term")
@@ -228,7 +238,7 @@ func (p *Parser) parseTerm(c *sitter.Node) term.Term {
 		})
 	default:
 		traverse(c, 0)
-		panic(fmt.Sprintf("unhandled term type: %s (%s)", c.Type(), c.Content(p.src)))
+		panic(fmt.Sprintf("unhandled term type: %s (%s)", c.Kind(), c.Utf8Text(p.src)))
 	}
 
 	return nil
@@ -237,18 +247,14 @@ func (p *Parser) parseTerm(c *sitter.Node) term.Term {
 func (p *Parser) parseFacts(node *sitter.Node, factQuery *sitter.Query, factQueryCursor *sitter.QueryCursor) []*rule.Fact {
 	var facts []*rule.Fact
 
-	factQueryCursor.Exec(factQuery, node)
-	for {
-		m, ok := factQueryCursor.NextMatch()
-		if !ok {
-			break
-		}
+	matches := factQueryCursor.Matches(factQuery, node, p.src)
+	for m := matches.Next(); m != nil; m = matches.Next() {
 		captures := getCaptureMap(factQuery, m)
 
 		args := []term.Term{}
 		if captures["fact.arguments"] != nil {
-			for i := uint32(0); i < captures["fact.arguments"].ChildCount(); i++ {
-				c := captures["fact.arguments"].Child(int(i))
+			for i := uint(0); i < captures["fact.arguments"].ChildCount(); i++ {
+				c := captures["fact.arguments"].Child(i)
 				if c.IsNamed() {
 					args = append(args, p.parseTerm(c))
 				}
@@ -256,14 +262,14 @@ func (p *Parser) parseFacts(node *sitter.Node, factQuery *sitter.Query, factQuer
 		}
 
 		var factType rule.FactType
-		switch captures["fact"].Type() {
+		switch captures["fact"].Kind() {
 		case "linear_fact":
 			factType = rule.LinearFact
 		case "persistent_fact":
 			factType = rule.PersistentFact
 		}
 
-		fact := rule.NewFact(captures["fact.name"].Content(p.src), args, factType)
+		fact := rule.NewFact(captures["fact.name"].Utf8Text(p.src), args, factType)
 
 		facts = append(facts, fact)
 	}
@@ -271,20 +277,50 @@ func (p *Parser) parseFacts(node *sitter.Node, factQuery *sitter.Query, factQuer
 	return facts
 }
 
-func ParseRules(ctx context.Context, filename string) ([]*rule.Rule, error) {
+// ParseFile reads the given file, preprocesses it with the given defines,
+// and parses the rules from it.
+func ParseFile(ctx context.Context, filename string, defines []string) ([]*rule.Rule, error) {
 	src, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, &ParseError{NewParser(filename, nil, nil), err}
 	}
 
+	// First parse for preprocessing
+	initialTree, err := Parse(ctx, src)
+	if err != nil {
+		// Create a parser instance for error reporting
+		p := NewParser(filename, src, spthy.GetLanguage())
+		return nil, &ParseError{p, err}
+	}
+
+	// Preprocess the source code
+	preprocessor := NewPreprocessor(src, defines)
+	preprocessedSrc := preprocessor.Run(initialTree.RootNode())
+
+	// Now, parse the preprocessed source to get the final AST
+	return parseRules(ctx, filename, preprocessedSrc)
+}
+
+func parseRules(ctx context.Context, filename string, src []byte) ([]*rule.Rule, error) {
 	p := NewParser(filename, src, spthy.GetLanguage())
 
 	sitterParser := sitter.NewParser()
-	sitterParser.SetLanguage(p.lang)
-
-	tree, err := sitterParser.ParseCtx(ctx, nil, src)
-	if err != nil {
+	defer sitterParser.Close()
+	if err := sitterParser.SetLanguage(p.lang); err != nil {
 		return nil, &ParseError{p, err}
+	}
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, &ParseError{p, ctx.Err()}
+		default:
+		}
+	}
+
+	tree := sitterParser.Parse(src, nil)
+	if tree == nil {
+		return nil, &ParseError{p, errors.New("failed to parse source")}
 	}
 
 	rootNode := tree.RootNode()
@@ -293,51 +329,52 @@ func ParseRules(ctx context.Context, filename string) ([]*rule.Rule, error) {
 		return nil, &ParseError{p, err}
 	}
 
-	ruleQuery, err := sitter.NewQuery([]byte(rulePattern), spthy.GetLanguage())
+	ruleQuery, err := sitter.NewQuery(spthy.GetLanguage(), rulePattern)
 	if err != nil {
 		return nil, &ParseError{p, err}
 	}
+	defer ruleQuery.Close()
 
-	factQuery, err := sitter.NewQuery([]byte(factPattern), spthy.GetLanguage())
+	factQuery, err := sitter.NewQuery(spthy.GetLanguage(), factPattern)
 	if err != nil {
 		return nil, &ParseError{p, err}
 	}
+	defer factQuery.Close()
 
 	ruleQueryCursor := sitter.NewQueryCursor()
-	ruleQueryCursor.Exec(ruleQuery, rootNode)
+	defer ruleQueryCursor.Close()
 
 	factQueryCursor := sitter.NewQueryCursor()
+	defer factQueryCursor.Close()
 
 	// formats := filterFormatMacros(p.parseMacros(rootNode))
 	formats := p.parseMacros(rootNode)
 
 	var rules []*rule.Rule
-	for {
+	ruleMatches := ruleQueryCursor.Matches(ruleQuery, rootNode, src)
+	for m := ruleMatches.Next(); m != nil; m = ruleMatches.Next() {
 		b := term.NewBinding()
 
-		m, ok := ruleQueryCursor.NextMatch()
-		if !ok {
-			break
-		}
+		captureMap := getCaptureMap(ruleQuery, m)
 
 		r := rule.NewRule()
-		for _, c := range m.Captures {
-			ruleCaptureName := ruleQuery.CaptureNameForId(c.Index)
-
-			switch ruleCaptureName {
-			case "rule.name":
-				r.Name = c.Node.Content(src)
-			case "rule.attrs":
-				r.Attrs = p.parseRuleAttributes(c.Node)
-			case "rule.let_block":
-				b = p.parseLetBlock(c.Node)
-			case "rule.LHS":
-				r.LHS = p.parseFacts(c.Node, factQuery, factQueryCursor)
-			case "rule.Act":
-				r.Act = p.parseFacts(c.Node, factQuery, factQueryCursor)
-			case "rule.RHS":
-				r.RHS = p.parseFacts(c.Node, factQuery, factQueryCursor)
-			}
+		if node := captureMap["rule.name"]; node != nil {
+			r.Name = node.Utf8Text(src)
+		}
+		if node := captureMap["rule.attrs"]; node != nil {
+			r.Attrs = p.parseRuleAttributes(node)
+		}
+		if node := captureMap["rule.let_block"]; node != nil {
+			b = p.parseLetBlock(node)
+		}
+		if node := captureMap["rule.LHS"]; node != nil {
+			r.LHS = p.parseFacts(node, factQuery, factQueryCursor)
+		}
+		if node := captureMap["rule.Act"]; node != nil {
+			r.Act = p.parseFacts(node, factQuery, factQueryCursor)
+		}
+		if node := captureMap["rule.RHS"]; node != nil {
+			r.RHS = p.parseFacts(node, factQuery, factQueryCursor)
 		}
 
 		// FIX: Need to check how to compute the fix point of formats and expend them
@@ -348,16 +385,41 @@ func ParseRules(ctx context.Context, filename string) ([]*rule.Rule, error) {
 	return rules, nil
 }
 
+// Parse parses the given source code and returns a tree-sitter tree.
+func Parse(ctx context.Context, source []byte) (*sitter.Tree, error) {
+	parser := sitter.NewParser()
+	defer parser.Close()
+	lang := spthy.GetLanguage()
+	if err := parser.SetLanguage(lang); err != nil {
+		return nil, err
+	}
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
+
+	tree := parser.Parse(source, nil)
+	if tree == nil {
+		return nil, errors.New("failed to parse source")
+	}
+
+	return tree, nil
+}
+
 // parseRuleAttributes parses the attributes of a rule node and returns a map of attribute key-value pairs.
 func (p *Parser) parseRuleAttributes(node *sitter.Node) map[string]rule.Attribute {
 	attrs := make(map[string]rule.Attribute)
 
-	for i := uint32(0); i < node.ChildCount(); i++ {
-		ruleAttr := node.Child(int(i))
-		if ruleAttr.Type() != "rule_attr" {
+	for i := uint(0); i < node.ChildCount(); i++ {
+		ruleAttr := node.Child(i)
+		if ruleAttr.Kind() != "rule_attr" {
 			continue
 		}
-		attrKey := strings.TrimSuffix(ruleAttr.Child(0).Type(), "=")
+		attrKey := strings.TrimSuffix(ruleAttr.Child(0).Kind(), "=")
 
 		switch attrKey {
 		case "hint", "trigger":
@@ -369,8 +431,8 @@ func (p *Parser) parseRuleAttributes(node *sitter.Node) map[string]rule.Attribut
 			attrs[attrKey] = rule.TermAttribute{Value: terms}
 		default:
 			var attrValue string
-			if ruleAttr.ChildCount() > 1 {
-				attrValue = ruleAttr.Child(1).Content(p.src)
+			if ruleAttr.ChildCount() > 2 {
+				attrValue = ruleAttr.Child(2).Utf8Text(p.src)
 			}
 			attrs[attrKey] = rule.StringAttribute{Value: attrValue}
 		}
@@ -382,9 +444,9 @@ func (p *Parser) parseRuleAttributes(node *sitter.Node) map[string]rule.Attribut
 func (p *Parser) parseLetBlock(node *sitter.Node) *term.Binding {
 	b := term.NewBinding()
 
-	for i := uint32(0); i < node.ChildCount(); i++ {
-		letItem := node.Child(int(i))
-		if letItem.Type() != "rule_let_term" {
+	for i := uint(0); i < node.ChildCount(); i++ {
+		letItem := node.Child(i)
+		if letItem.Kind() != "rule_let_term" {
 			continue
 		}
 
@@ -400,19 +462,18 @@ func (p *Parser) parseLetBlock(node *sitter.Node) *term.Binding {
 func (p *Parser) parseMacros(n *sitter.Node) *term.Binding {
 	b := term.NewBinding()
 
-	query, err := sitter.NewQuery([]byte(macroPattern), p.lang)
+	query, err := sitter.NewQuery(p.lang, macroPattern)
 	if err != nil {
 		return b
 	}
+	defer query.Close()
 
 	cursor := sitter.NewQueryCursor()
-	cursor.Exec(query, n)
+	defer cursor.Close()
 
-	for {
-		m, ok := cursor.NextMatch()
-		if !ok {
-			break
-		}
+	matches := cursor.Matches(query, n, p.src)
+
+	for m := matches.Next(); m != nil; m = matches.Next() {
 
 		captureMap := getCaptureMap(query, m)
 
@@ -435,7 +496,7 @@ func (p *Parser) parseMacros(n *sitter.Node) *term.Binding {
 // parsePubName parses a pub_name node and returns a constant.
 func (p *Parser) parsePubName(n *sitter.Node) term.Term {
 	// FIXME: pub_name wrapped in single quotes.
-	name := strings.Trim(n.Content(p.src), "'")
+	name := strings.Trim(n.Utf8Text(p.src), "'")
 
 	if i, err := strconv.Atoi(name); err == nil {
 		return term.NewConstant[int](i)
@@ -456,11 +517,11 @@ func (p *Parser) parsePubName(n *sitter.Node) term.Term {
 // traverse a node and print its type and content.
 func traverse(node *sitter.Node, depth int) {
 	// Print information about the current node
-	fmt.Printf("%*sType: %s, Start: %d, End: %d, Node: %v\n", depth*2, "", node.Type(), node.StartByte(), node.EndByte(), node)
+	fmt.Printf("%*sType: %s, Start: %d, End: %d, Node: %v\n", depth*2, "", node.Kind(), node.StartByte(), node.EndByte(), node)
 
 	// Recursively traverse child nodes
-	for i := uint32(0); i < node.ChildCount(); i++ {
-		child := node.Child(int(i))
+	for i := uint(0); i < node.ChildCount(); i++ {
+		child := node.Child(i)
 		traverse(child, depth+1)
 	}
 }

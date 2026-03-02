@@ -36,21 +36,25 @@ import (
 )
 
 const (
-	ConstantType     = "constant"
-	VariableType     = "variable"
-	FunctionType     = "function"
-	PairFunctionName = "pair"
-	ExpFunctionName  = "exp"
-	AndFunctionName  = "and"
-	OrFunctionName   = "or"
-	AddFunctionName  = "add"
-	BinaryArity      = 2
+	ConstantType      = "constant"
+	VariableType      = "variable"
+	FunctionType      = "function"
+	PairFunctionName  = "pair"
+	SliceFunctionName = "slice"
+	ReverseFuncName   = "reverse"
+	ExpFunctionName   = "exp"
+	AndFunctionName   = "and"
+	OrFunctionName    = "or"
+	AddFunctionName   = "add"
+	BinaryArity       = 2
+	TernaryArity      = 3
 
 	PublicPrefix = "$"
 )
 
 var ReservedNames = data.NewSet[string](
 	PairFunctionName,
+	SliceFunctionName,
 	CatFunctionName,
 	AddFunctionName,
 	AndFunctionName,
@@ -77,8 +81,10 @@ var (
 
 	ErrInvalidFormatFunction = errors.New("invalid format: expected byte(), string(), int()")
 
-	ErrBinaryArity = errors.New("expecte arity 2")
-	ErrInvalidType = errors.New("invalid type for arithmetic function")
+	ErrUnaryArity   = errors.New("expected arity 1")
+	ErrBinaryArity  = errors.New("expected arity 2")
+	ErrTernaryArity = errors.New("expected arity 3")
+	ErrInvalidType  = errors.New("invalid type for arithmetic function")
 )
 
 type Term interface {
@@ -640,34 +646,56 @@ func (e *UnificationError) Error() string {
 }
 
 func unify(a1, a2 Term, b *Binding) error {
+	// Fast path: check types first before expensive Equal()
+	t1Type := a1.GetType()
+	t2Type := a2.GetType()
+
+	// Early termination for obviously incompatible types
+	if t1Type == ConstantType && t2Type == ConstantType {
+		// For constants, Equal is relatively cheap, do it early
+		if !a1.Equal(a2) {
+			return ErrConstantsNoMatch
+		}
+		return nil
+	}
+
+	// For functions, check name/arity before full equality
+	if t1Type == FunctionType && t2Type == FunctionType {
+		f1 := Must(AsFunction(a1))
+		f2 := Must(AsFunction(a2))
+
+		// Quick rejection: name or arity mismatch
+		if f1.Name != f2.Name || len(f1.Args) != len(f2.Args) {
+			return ErrNameOrArgMismatch
+		}
+
+		// Now check full equality (which recurses into args)
+		if a1.Equal(a2) {
+			return nil
+		}
+
+		// Not equal but compatible, continue with unification
+		for i := range f1.Args {
+			if err := unify(f1.Args[i], f2.Args[i], b); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// For other combinations, do standard equality check
 	if a1.Equal(a2) {
 		return nil
 	}
 
 	switch {
-	case a1.GetType() == FunctionType && a2.GetType() == FunctionType:
-		// Two functions are unifiable if
-		// - they have the same name and
-		// - number of arguments and
-		// - their arguments are unifiable.
-		t1 := Must(AsFunction(a1))
-		t2 := Must(AsFunction(a2))
-
-		if t1.Name != t2.Name || len(t1.Args) != len(t2.Args) {
-			// return &UnificationError{a1, a2, "name or number of arguments do not match"}
-			return ErrNameOrArgMismatch
-		}
-
-		for i := range t1.Args {
-			if err := unify(t1.Args[i], t2.Args[i], b); err != nil {
-				// return &UnificationError{a1, a2, err.Error()}
-				return err
-			}
-		}
-	case a1.GetType() == FunctionType && a2.GetType() == VariableType:
+	case t1Type == FunctionType && t2Type == FunctionType:
+		// Already handled above
+		return nil
+	case t1Type == FunctionType && t2Type == VariableType:
 		// Swap the order of the terms and try again.
 		return unify(a2, a1, b)
-	case a1.GetType() == FunctionType && a2.GetType() == ConstantType:
+	case t1Type == FunctionType && t2Type == ConstantType:
 		// A function is unifiable with a constant if
 		// - the function is a format and
 		// - the evaluated format is equal to the constant.
@@ -709,10 +737,10 @@ func unify(a1, a2 Term, b *Binding) error {
 		})
 
 		return nil
-	case a1.GetType() == ConstantType && (a2.GetType() == FunctionType || a2.GetType() == VariableType):
+	case t1Type == ConstantType && (t2Type == FunctionType || t2Type == VariableType):
 		// Swap the order of the terms and try again.
 		return unify(a2, a1, b)
-	case a1.GetType() == VariableType:
+	case t1Type == VariableType:
 		v := Must(AsVariable(a1))
 
 		if slices.Contains(Vars(a2), v) {
@@ -727,12 +755,9 @@ func unify(a1, a2 Term, b *Binding) error {
 		})
 
 		b.Set(v, a2)
-	case a1.GetType() == ConstantType && a2.GetType() == ConstantType:
-		// Two constants are unifiable if they are equal.
-		if !a1.Equal(a2) {
-			// return &UnificationError{a1, a2, "constants are not equal"}
-			return ErrConstantsNoMatch
-		}
+	case t1Type == ConstantType && t2Type == ConstantType:
+		// Already handled at the top with early termination
+		return nil
 	default:
 		return ErrUnknownType
 	}
@@ -760,6 +785,23 @@ func UnifyReplace(t, g, h Term) Term {
 	}
 
 	return u
+}
+
+func UnifyReplaceRecursive(t, g, h Term) Term {
+	current := t
+
+	// Keep applying replacements until no more changes occur
+	for {
+		previous := current
+		current = UnifyReplace(current, g, h)
+
+		// If no changes occurred, we're done
+		if current.Equal(previous) {
+			break
+		}
+	}
+
+	return current
 }
 
 // Find a (sub)term g of t such that p(g) holds and replace it with r(g) in t.
@@ -855,6 +897,10 @@ func Evaluate(t Term) (Term, error) {
 		return handleCatFunction(f, newArgs, modified)
 	case AddFunctionName, AndFunctionName, OrFunctionName:
 		return handleArithmeticFunction(f, newArgs, modified)
+	case SliceFunctionName:
+		return handleSliceFunction(f, newArgs, modified)
+	case ReverseFuncName:
+		return handleReverseFunction(f, newArgs, modified)
 	default:
 		if !modified {
 			return t, nil
@@ -965,6 +1011,116 @@ func handleArithmeticFunction(f *Function, args []Term, modified bool) (Term, er
 		return NewConstant[[]byte](b[:len(ft.Value)]), nil
 	default:
 		return nil, ErrInvalidType
+	}
+}
+
+func handleSliceFunction(f *Function, args []Term, modified bool) (Term, error) {
+	if len(args) != TernaryArity {
+		return nil, ErrTernaryArity
+	}
+
+	data, err := AsBytes(args[0])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	start, err := AsInt(args[1])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	end, err := AsInt(args[2])
+	if err != nil {
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	dataLen := len(data)
+
+	// Resolve start index
+	resolvedStart := start
+	if resolvedStart < 0 {
+		resolvedStart = dataLen + resolvedStart
+	}
+
+	// Resolve end index
+	resolvedEnd := end
+	if end == 0 { // Special case: 0 means "until the end"
+		resolvedEnd = dataLen
+	} else if end < 0 {
+		resolvedEnd = dataLen + end
+	}
+
+	// Clamp indices to the bounds of the data slice
+	if resolvedStart < 0 {
+		resolvedStart = 0
+	}
+	if resolvedStart > dataLen {
+		resolvedStart = dataLen
+	}
+
+	if resolvedEnd < 0 {
+		resolvedEnd = 0
+	}
+	if resolvedEnd > dataLen {
+		resolvedEnd = dataLen
+	}
+
+	// If start is after end, return an empty slice
+	if resolvedStart >= resolvedEnd {
+		return NewConstant[[]byte]([]byte{}), nil
+	}
+
+	return NewConstant[[]byte](data[resolvedStart:resolvedEnd]), nil
+}
+
+func handleReverseFunction(f *Function, args []Term, modified bool) (Term, error) {
+	if len(args) != 1 {
+		return nil, ErrUnaryArity
+	}
+
+	arg := args[0]
+
+	originalBytes, err := AsBytes(arg)
+	if err != nil {
+		// If the argument cannot be converted to bytes (e.g., it's a variable),
+		// return the function call, possibly with an evaluated argument.
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
+	}
+
+	// Slices.Reverse is in-place, so we must copy the data first
+	// to avoid modifying the original constant's value.
+	reversedBytes := make([]byte, len(originalBytes))
+	copy(reversedBytes, originalBytes)
+	slices.Reverse(reversedBytes)
+
+	// Preserve the original constant type.
+	switch arg.(type) {
+	case *Constant[int]:
+		// The size of the byte slice is preserved, so this conversion is safe.
+		newValue, _ := utils.BytesToInt(reversedBytes, internalByteOrder())
+		return NewConstant[int](newValue), nil
+	case *Constant[string]:
+		return NewConstant[string](string(reversedBytes)), nil
+	case *Constant[[]byte]:
+		return NewConstant[[]byte](reversedBytes), nil
+	default:
+		// This case should not be reached if AsBytes succeeds, but as a fallback.
+		if modified {
+			return NewFunction(f.Name, args), nil
+		}
+		return f, nil
 	}
 }
 

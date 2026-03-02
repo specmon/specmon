@@ -240,9 +240,10 @@ func (d *DAGNode[V, E]) Traverse(dir TraversalDirection, typ TraversalType, visi
 
 		var label E
 		if P[n] != nil {
-			if dir == TraverseDown {
+			switch dir {
+			case TraverseDown:
 				label = P[n].Label(n)
-			} else if dir == TraverseUp {
+			case TraverseUp:
 				label = n.Label(P[n])
 			}
 		}

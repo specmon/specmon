@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,7 +48,10 @@ const (
 	consumedChanSize = 4096
 )
 
-var ErrNoApplicableRule = errors.New("no applicable rule found")
+var (
+	ErrNoApplicableRule    = errors.New("no applicable rule found")
+	ErrRestrictionViolated = errors.New("restriction violated")
+)
 
 type Unifier[T any] interface {
 	fmt.Stringer
@@ -205,7 +209,7 @@ func (m *Monitor) findPossibleEvents() [][]term.Term {
 		var e []term.Term
 		for _, rs := range m.rules {
 			for _, r := range rs {
-				for _, b := range conflictSet(c.facts, r.LHS).Values() {
+				for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 					s := r.Subst(b)
 					e = append(e, s.Hints()...)
 					e = append(e, s.Triggers()...)
@@ -254,7 +258,7 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 	log.Tracef("handleTriggers(%s, %s, %s)\n\n", c, a, r.Name)
 
 	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSet(c.facts, r.LHS).Values() {
+	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 		// Instantiate the triggers with the found binding.
 		// This ensures
 		//   1. The binding found is compatible with b.
@@ -270,7 +274,7 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 		d := c.Clone()
 		d.AddSeen(a.Subst(bt))
 
-		triggerBindings := conflictSet(d.seen, instTriggers)
+		triggerBindings := conflictSetTerms(d.seen, instTriggers)
 
 		if triggerBindings.Empty() {
 			log.Infof("rule %s is not applicable: missing triggers", r.Name)
@@ -293,6 +297,9 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 				}
 
 				C.Add(RuleApplication{r, withTrigger, e})
+			} else if errors.Is(err, ErrRestrictionViolated) {
+				log.Infof("rule %s not applicable due to restriction: %v", r.Name, err)
+				continue
 			} else {
 				return nil, err
 			}
@@ -308,7 +315,7 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 	aName := splitPairFirstName(a)
 
 	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSet(c.facts, r.LHS).Values() {
+	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 		// Instantiate the hints with the found binding.
 		// This ensures
 		//   1. The binding found is compatible with b.
@@ -325,6 +332,10 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 
 		d, err := c.ApplyRule(r, hb)
 		if err != nil {
+			if errors.Is(err, ErrRestrictionViolated) {
+				log.Infof("hint rule %s not applicable due to restriction: %v", r.Name, err)
+				continue
+			}
 			return nil, err
 		}
 
@@ -333,6 +344,10 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 
 		D := data.NewHashSet[RuleApplication]()
 		for _, rr := range rules[aName] {
+			// Skip rules without triggers - we only want to apply trigger rules here
+			if !rr.HasTriggers() {
+				continue
+			}
 			next, err := handleTriggers(d, g, rr, rules)
 			if err != nil {
 				return nil, err
@@ -360,7 +375,7 @@ func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
 	var C []*Config
 
 	for _, r := range rules[""] {
-		for _, b := range conflictSet(c.facts, r.LHS).Values() {
+		for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
 			log.Infof("epsilon rule %s is applicable\n  binding: %s", r.Name, b)
 
 			d, err := c.ApplyRule(r, b)
@@ -384,38 +399,142 @@ func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
 	return C[0], nil
 }
 
-func conflictSet[E any, T Unifier[E]](facts, body []T) *data.HashSet[*term.Binding] {
-	log.Debugf("conflictSet( %v, %v )\n", facts, body)
+func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term) *data.HashSet[*term.Binding] {
+	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
-	type QueueItem struct {
-		index int
-		binds *term.Binding
+	// Index items by name, keeping track of original indices
+	itemsByName := make(map[string][]int, len(items))
+	for i, item := range items {
+		if indexable(item) {
+			itemsByName[name(item)] = append(itemsByName[name(item)], i)
+		}
 	}
 
-	var item QueueItem
+	// Pre-filter candidates per body atom by constant positions for ordering.
+	n := len(body)
+	prefilter := make([][]int, n)
+	order := make([]int, n)
 
-	queue := []QueueItem{{0, term.NewBinding()}}
-	B := data.NewHashSet[*term.Binding]()
+	for i, p := range body {
+		var candIndices []int
+		if indexable(p) {
+			candIndices = itemsByName[name(p)]
+			if len(candIndices) == 0 {
+				// No matches possible at all.
+				return data.NewHashSet[*term.Binding]()
+			}
+			// Filter by constants in p (cheap check before unification).
+			filtered := make([]int, 0, len(candIndices))
+			for _, idx := range candIndices {
+				f := items[idx]
+				ok := true
+				pArgs := args(p)
+				fArgs := args(f)
+				// This check assumes len(pArgs) == len(fArgs), which should hold for unification candidates.
+				if len(pArgs) == len(fArgs) {
+					for j, a := range pArgs {
+						if a.GetType() == term.ConstantType {
+							if !a.Equal(fArgs[j]) {
+								ok = false
+								break
+							}
+						}
+					}
+				} else {
+					ok = false
+				}
 
-	for len(queue) > 0 {
-		item, queue = queue[0], queue[1:]
+				if ok {
+					filtered = append(filtered, idx)
+				}
+			}
+			prefilter[i] = filtered
+		} else {
+			// Fallback: no indexing possible, scan all items.
+			allIndices := make([]int, len(items))
+			for j := range items {
+				allIndices[j] = j
+			}
+			prefilter[i] = allIndices
+		}
+		order[i] = i
+	}
+	// Sort atoms by increasing number of prefiltered candidates to prune early.
+	sort.Slice(order, func(i, j int) bool { return len(prefilter[order[i]]) < len(prefilter[order[j]]) })
 
-		if item.index == len(body) {
-			B.Add(item.binds)
+	result := data.NewHashSet[*term.Binding]()
 
-			continue
+	// Track which items from the original items slice have been used.
+	// This ensures multiset semantics s.t. each fact can only be consumed once.
+	// Use backtracking (mark/unmark) instead of copying map on each recursive call.
+	usedItems := make(map[int]bool)
+
+	var dfs func(pos int, b *term.Binding)
+	dfs = func(pos int, b *term.Binding) {
+		if pos == n {
+			result.Add(b)
+			return
 		}
 
-		pred := body[item.index].Subst(item.binds)
+		idx := order[pos]
+		p := body[idx]
+		// Apply current binding once per depth.
+		ps := p.Subst(b)
 
-		for _, fact := range facts {
-			if b, err := fact.Unify(pred); err == nil {
-				queue = append(queue, QueueItem{item.index + 1, b.Extend(item.binds)})
+		for _, itemIdx := range prefilter[idx] {
+			// Skip if this fact has already been used in this binding path
+			if usedItems[itemIdx] {
+				continue
+			}
+
+			f := items[itemIdx]
+			if delta, err := f.Unify(ps); err == nil {
+				// Mark item as used (backtracking pattern)
+				usedItems[itemIdx] = true
+				dfs(pos+1, delta.Extend(b))
+				// Unmark item for other branches
+				delete(usedItems, itemIdx)
 			}
 		}
 	}
 
-	return B
+	dfs(0, term.NewBinding())
+	return result
+}
+
+// conflictSetFacts matches a sequence of fact patterns against a multiset of facts.
+// It builds a per-predicate local index and uses DFS with early filtering by constants.
+func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *data.HashSet[*term.Binding] {
+	return conflictSet(facts, body,
+		func(_ *rule.Fact) bool { return true },
+		func(f *rule.Fact) string { return f.Name },
+		func(f *rule.Fact) []term.Term { return f.Args },
+	)
+}
+
+// conflictSetTerms matches a sequence of term patterns against a set of seen terms.
+// It builds a local index by function name and orders patterns by selectivity.
+func conflictSetTerms(seen []term.Term, body []term.Term) *data.HashSet[*term.Binding] {
+	return conflictSet(seen, body,
+		func(t term.Term) bool {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil && fn.Name != term.PairFunctionName {
+				return true
+			}
+			return false
+		},
+		func(t term.Term) string {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil {
+				return fn.Name
+			}
+			return ""
+		},
+		func(t term.Term) []term.Term {
+			if fn, err := term.AsFunction(t); err == nil && fn != nil {
+				return fn.Args
+			}
+			return nil
+		},
+	)
 }
 
 //
@@ -507,17 +626,14 @@ func (s *Stats) JSON() string {
 	return string(jsonStats)
 }
 
-func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term) {
-	out := make(chan *TimedEvent, outChanSize)
-	consumed := make(chan term.Term, consumedChanSize)
+// ParseEvents converts an io.Reader containing JSON events into a channel of TimedEvent.
+// It handles JSON parsing and filtering of comment lines.
+func ParseEvents(r io.Reader, pid int) <-chan *TimedEvent {
+	events := make(chan *TimedEvent, outChanSize)
 	s := bufio.NewScanner(r)
 
-	m.stats.StartTime = time.Now()
-
 	go func() {
-		defer close(out)
-		defer close(consumed)
-		defer func() { m.stats.EndTime = time.Now() }()
+		defer close(events)
 
 		for s.Scan() {
 			if strings.HasPrefix(s.Text(), "//") {
@@ -532,7 +648,35 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 				log.Fatalf("failed to parse event: %v", err)
 			}
 
-			if event.Event == nil {
+			events <- event
+		}
+
+		if err := s.Err(); err != nil {
+			if err := utils.KillProcess(pid); err != nil {
+				log.Errorf("failed to kill process: %v", err)
+			}
+			log.Fatalf("scanner error: %v", err)
+		}
+	}()
+
+	return events
+}
+
+// ProcessEvents processes events from a channel and returns output channels.
+// This is the core processing function that handles the monitoring logic.
+func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term) {
+	out := make(chan *TimedEvent, outChanSize)
+	consumed := make(chan term.Term, consumedChanSize)
+
+	m.stats.StartTime = time.Now()
+
+	go func() {
+		defer close(out)
+		defer close(consumed)
+		defer func() { m.stats.EndTime = time.Now() }()
+
+		for event := range events {
+			if event == nil || event.Event == nil {
 				if err := utils.KillProcess(pid); err != nil {
 					log.Errorf("failed to kill process: %v", err)
 				}
@@ -540,7 +684,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 			}
 
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
-			// log.Infof("processing event: %s", event.Event)
+
 			if err := m.ProcessEvent(event.Event); err != nil {
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
@@ -554,6 +698,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 				}
 				log.Fatalf("error processing event: %v %s", err, event.Event)
 			}
+
 			m.stats.LatenciesProcessed = append(m.stats.LatenciesProcessed, time.Since(time.Unix(0, event.Time)))
 
 			if rewrite {
@@ -563,7 +708,7 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 						for _, f := range p {
 							if r := getRewriteTerm(f); r != nil {
 								fr := term.Must(term.AsFunction(r))
-								out <- &TimedEvent{Time: /* event.Time */ time.Now().UnixNano(), Event: fr}
+								out <- &TimedEvent{Time: event.Time, Event: fr}
 							}
 						}
 					default:
@@ -573,15 +718,6 @@ func (m *Monitor) ProcessEventsFromReader(r io.Reader, rewrite bool, pid int) (<
 			} else {
 				consumed <- event.Event
 			}
-		}
-
-		m.stats.EndTime = time.Now()
-
-		if err := s.Err(); err != nil {
-			if err := utils.KillProcess(pid); err != nil {
-				log.Errorf("failed to kill process: %v", err)
-			}
-			log.Fatalf("scanner error: %v", err)
 		}
 
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())

@@ -1,0 +1,9 @@
+theory ExistingHints
+begin
+
+rule TestRuleWithHint [ hint=[<len(y), len_y>] ]:
+  [ State0(m) ] 
+  --> 
+  [ Out(len(hash(m))), State1(m) ]
+
+end

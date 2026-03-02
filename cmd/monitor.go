@@ -32,14 +32,15 @@ import (
 
 // MonitorConfig is the configuration for the monitor subcommand.
 type MonitorConfig struct {
-	In       string `flag:"in"   short:"i" desc:"input path"`
-	Out      string `flag:"out"  short:"o" desc:"output path"`
-	PreTrace string `flag:"pre-trace" short:"p" desc:"pre-trace path"`
-	Pid      int    `flag:"pid"  short:"P" desc:"PID of the monitored process to terminate"`
+	In          string `flag:"in"           short:"i" desc:"input path (file, '-', host:port)"`
+	Out         string `flag:"out"          short:"o" desc:"output path"`
+	PreTrace    string `flag:"pre-trace"    short:"p" desc:"pre-trace path"`
+	Pid         int    `flag:"pid"          short:"P" desc:"PID of the monitored process to terminate"`
+	RewriteWith string `flag:"rewrite-with" short:"R" desc:"rewrite theory (.spthy) to apply inline before monitoring"`
 }
 
 // RunE runs the monitor subcommand.
-func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
+func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	quiet, _ := cmd.Root().Flags().GetBool("quiet")
 	pid, err := cmd.Root().Flags().GetInt("pid")
 	if err != nil {
@@ -54,8 +55,10 @@ func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		<-sigs
 
 		fmt.Fprintln(os.Stderr, "SIGTERM received, exiting...")
-		m.Stats().EndTime = time.Now()
-		fmt.Fprintln(os.Stderr, m.Stats().JSON())
+		if m != nil {
+			m.Stats().EndTime = time.Now()
+			fmt.Fprintln(os.Stderr, m.Stats().JSON())
+		}
 
 		os.Exit(0)
 	}()
@@ -64,45 +67,89 @@ func (r MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	role, _ := cmd.Root().Flags().GetString("role")
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
+	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 
-	_, _, decompRules, err := ProcessRules(specPath, role, decompose)
+	// Parse main monitoring rules
+	_, _, decompRules, err := ProcessRules(specPath, role, decompose, defines)
 	if err != nil {
 		return err
 	}
 
-	eventSource, err := getEventSource(r.In)
+	// Open input
+	eventSource, err := openInputReader(r.In)
 	if err != nil {
-		return fmt.Errorf("cannot open in file: %w", err)
+		return fmt.Errorf("cannot open input: %w", err)
 	}
 	defer eventSource.Close()
 
-	source := io.Reader(eventSource)
+	// Create the main monitor
+	m, err = monitor.NewMonitor(decompRules)
+	if err != nil {
+		return fmt.Errorf("cannot create monitor: %w", err)
+	}
 
+	if r.RewriteWith != "" {
+		// Integrated rewrite mode: first process pre-trace directly to main monitor,
+		// then feed live input through the rewriter and into the main monitor.
+		rewriteRules, _, _, err := ProcessRules(r.RewriteWith, role, decompose, defines)
+		if err != nil {
+			return fmt.Errorf("cannot process rewrite rules: %w", err)
+		}
+
+		count := 1
+
+		// 1) Pre-trace to main monitor (no rewrite)
+		if r.PreTrace != "" {
+			preTrace, err := os.Open(r.PreTrace)
+			if err != nil {
+				return fmt.Errorf("cannot open pre-trace file: %w", err)
+			}
+			defer preTrace.Close()
+
+			events := monitor.ParseEvents(preTrace, pid)
+			_, consumedPre := m.ProcessEvents(events, false, pid)
+			for c := range consumedPre {
+				if !quiet {
+					fmt.Printf("  %4d: %.120s\n", count, c)
+				}
+				count++
+			}
+		}
+
+		// 2) Live events: rewriter -> main monitor via channel
+		rewriter, err := monitor.NewMonitor(rewriteRules)
+		if err != nil {
+			return fmt.Errorf("cannot create rewrite monitor: %w", err)
+		}
+
+		rewriterEvents := monitor.ParseEvents(eventSource, pid)
+		outs, _ := rewriter.ProcessEvents(rewriterEvents, true, pid)
+		_, consumedEvents := m.ProcessEvents(outs, false, pid)
+
+		for c := range consumedEvents {
+			if !quiet {
+				fmt.Printf("  %4d: %.120s\n", count, c)
+			}
+			count++
+		}
+
+		fmt.Println(m.Stats().JSON())
+		return nil
+	}
+
+	// No rewrite: use original logic with MultiReader for pre-trace
+	source := io.Reader(eventSource)
 	if r.PreTrace != "" {
 		preTrace, err := os.Open(r.PreTrace)
 		if err != nil {
 			return fmt.Errorf("cannot open pre-trace file: %w", err)
 		}
 		defer preTrace.Close()
-
 		source = io.MultiReader(preTrace, eventSource)
 	}
 
-	// events, errs := monitor.ReadEvents(source)
-
-	// go func() {
-	// 	for err := range errs {
-	// 		log.Fatal(err)
-	// 	}
-	// }()
-
-	m, err = monitor.NewMonitor(decompRules)
-	if err != nil {
-		return fmt.Errorf("cannot create monitor: %w", err)
-	}
-
-	// _, consumed := m.ProcessEvents(events, false)
-	_, consumed := m.ProcessEventsFromReader(source, false, pid)
+	events := monitor.ParseEvents(source, pid)
+	_, consumed := m.ProcessEvents(events, false, pid)
 
 	count := 1
 	for c := range consumed {
