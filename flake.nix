@@ -13,7 +13,7 @@
       in
       pkgs.mkShell {
         buildInputs = [
-          pkgs.go
+          pkgs.go_1_26
 	  pkgs.gotools
 	  pkgs.gopls
 	  pkgs.golangci-lint
