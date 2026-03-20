@@ -1,0 +1,20 @@
+theory SymbolicDemo
+
+begin
+
+rule Recv[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule Hash[no-decomp, role="*", trigger=[<hash(m), <>>]]:
+  [ ] --> [ ]
+
+rule Hmac[no-decomp, role="*", trigger=[<hmac(k, m), <>>]]:
+  [ ] --> [ ]
+
+rule Enc[no-decomp, role="*", trigger=[<enc(m), <>>]]:
+  [ ] --> [ ]
+
+rule Dec[no-decomp, role="*", trigger=[<dec(m), <>>]]:
+  [ ] --> [ ]
+
+end

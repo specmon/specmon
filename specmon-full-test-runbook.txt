@@ -1,0 +1,172 @@
+SpecMon Full Test Runbook
+=========================
+
+0. Setup
+--------
+
+go build -o specmon .
+
+
+Task 1: Default Mode (Rule Display)
+-----------------------------------
+Simple-MAC
+./specmon simple-mac/simple-mac.spthy
+./specmon simple-mac/simple-mac.spthy --verbose
+./specmon simple-mac/simple-mac.spthy --rule Setup
+./specmon simple-mac/simple-mac.spthy --rule Setup --verbose
+
+WireGuard
+./specmon wireguard/monitor/wireguard.spthy
+./specmon wireguard/monitor/wireguard.spthy --verbose
+./specmon wireguard/monitor/wireguard.spthy --rule AddPublicKey
+./specmon wireguard/monitor/wireguard.spthy --rule AddPublicKey --verbose
+
+
+Task 2: Monitoring Mode (Compact / Verbose Output UX)
+-----------------------------------------------------
+Pre-trace erzeugen
+python simple-mac/pre-trace.py 0x736563726574 > simple-mac/pretrace.json
+
+Compact (default)
+./specmon monitor --pre-trace simple-mac/pretrace.json --in simple-mac/eval/offline/traces/10_evaluation_202404151714.json simple-mac/simple-mac.monitor.spthy
+
+Verbose
+./specmon monitor --pre-trace simple-mac/pretrace.json --in simple-mac/eval/offline/traces/10_evaluation_202404151714.json simple-mac/simple-mac.monitor.spthy --verbose
+
+
+Task 3: Structured Error Display
+--------------------------------
+B: Error block + expected events
+./specmon monitor --pre-trace simple-mac/pretrace.json --in simple-mac/eval/offline/traces/10_evaluation_202404151714.json simple-mac/simple-mac.monitor.err.spthy
+
+B: --show-all-events
+./specmon monitor --in testdata/created-test/created-test.json testdata/created-test/created-test.monitor.spthy
+./specmon monitor --show-all-events --in testdata/created-test/created-test.json testdata/created-test/created-test.monitor.spthy
+
+C: Multi-config Anzeige
+./specmon monitor --in testdata/branching-example/branching.json testdata/branching-example/branching.monitor.spthy
+./specmon monitor --show-all-configs --in testdata/branching-example/branching.json testdata/branching-example/branching.monitor.spthy
+./specmon monitor --trace-config=2 --in testdata/branching-example/branching.json testdata/branching-example/branching.monitor.spthy
+
+
+Task 4A: Live Dashboard (--live)
+--------------------------------
+Normal live
+./specmon monitor --live --in testdata/long-run/long-run.json testdata/long-run/long-run.monitor.spthy
+
+Live mit Fehler
+./specmon monitor --live --pre-trace simple-mac/pretrace.json --in simple-mac/eval/offline/traces/10_evaluation_202404151714.json simple-mac/simple-mac.monitor.err.spthy
+
+Live Multi-config
+./specmon monitor --live --in testdata/live-multi/live-multi.json testdata/live-multi/live-multi.monitor.spthy
+./specmon monitor --live --in testdata/live-multi-error/live-multi-error.json testdata/live-multi-error/live-multi-error.monitor.spthy
+
+Live mit groesserer History
+./specmon monitor --live --increase-history 4000 --in testdata/live-multi/live-multi.json testdata/live-multi/live-multi.monitor.spthy
+
+
+Task 4B: Progress Mode (--progress)
+-----------------------------------
+Standard progress (pre-trace + live trace)
+./specmon monitor --progress --pre-trace simple-mac/pretrace.json --in simple-mac/eval/offline/traces/10_evaluation_202404151714.json simple-mac/simple-mac.monitor.spthy
+
+Grosser Progress-Test
+./specmon monitor --progress --in testdata/progress-large/progress-large.json testdata/progress-large/progress-large.monitor.spthy
+
+
+Task 5: Format Inference
+------------------------
+Basic
+./specmon monitor --infer-formats --in testdata/format-infer/format-infer.json testdata/format-infer/format-infer.monitor.spthy
+
+Mehr Heuristik-Treffer
+./specmon monitor --infer-formats --min-component-length=1 --inference-confidence=ALL --in testdata/format-infer/format-infer.json testdata/format-infer/format-infer.monitor.spthy
+
+Report in Datei
+./specmon monitor --infer-formats --format-report=format-report.txt --in testdata/format-infer/format-infer.json testdata/format-infer/format-infer.monitor.spthy
+
+Mixed methods / mehrere Pattern
+./specmon monitor --infer-formats --inference-confidence=LOW --in testdata/format-infer/format-infer-mixed-methods.json --format-report=format-report-mixed-methods.txt testdata/format-infer/format-infer-mixed.monitor.spthy
+
+
+Task 6: Symbolic Reconstruction
+-------------------------------
+A: Symbolic trace
+./specmon monitor --symbolic-trace --in testdata/symbolic-demo/symbolic-demo.json testdata/symbolic-demo/symbolic-demo.monitor.spthy
+
+C: Dual mode (symbolic + concrete values)
+./specmon monitor --symbolic-trace --show-concrete --in testdata/symbolic-demo/symbolic-demo.json testdata/symbolic-demo/symbolic-demo.monitor.spthy
+
+B: Term report + provenance
+./specmon monitor --symbolic-trace --show-provenance --term-report=term-report.txt --in testdata/symbolic-demo/symbolic-demo.json testdata/symbolic-demo/symbolic-demo.monitor.spthy
+
+Computed term reuse (recompute demo)
+./specmon monitor --symbolic-trace --show-provenance --term-report=term-report-recompute.txt --in testdata/symbolic-demo/symbolic-recompute-demo.json testdata/symbolic-demo/symbolic-recompute-demo.monitor.spthy -v
+
+
+
+
+
+Using WireGuard Test Data 
+==========================================
+
+
+Task 1 - Default Mode (Rule Display)
+------------------------------------
+1A) Summary view
+./specmon wirgeguardTest/wireguard.spthy
+
+1B) Verbose grouped rule view
+./specmon wirgeguardTest/wireguard.spthy --verbose
+
+1C) Filter by one rule (example)
+./specmon wirgeguardTest/wireguard.spthy --rule Handshake_Resp_1
+
+1D) Filter + verbose
+./specmon wirgeguardTest/wireguard.spthy --rule Handshake_Resp_1 --verbose
+
+
+Task 2 - Monitor Mode (Compact / Verbose / Progress)
+----------------------------------------------------
+2A) Compact monitor with rewrite (normal flow)
+./specmon monitor -D SPECMON --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy
+
+2B) Verbose monitor
+./specmon monitor -D SPECMON --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy -v
+
+
+
+Task 3 - Error Display / Diagnostics
+------------------------------------
+3A) Intentionally run without rewrite to trigger mismatch / error formatting
+./specmon monitor --in wirgeguardTest/server.jsonl wirgeguardTest/wireguard.spthy
+
+
+Task 4A - Live Dashboard
+------------------------
+4A) Live mode (rewrite flow)
+./specmon monitor --live -D SPECMON --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy
+
+4B) Progress mode
+./specmon monitor --progress -D SPECMON --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy
+
+
+
+Task 5 - Format Inference
+-------------------------
+
+
+5A) Standard inference report
+./specmon monitor -D SPECMON --infer-formats --format-report=wg-format-report.txt --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy
+
+5B) Looser inference settings (more matches)
+./specmon monitor -D SPECMON --infer-formats --min-component-length=1 --inference-confidence=ALL --format-report=wg-format-report.txt --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy
+
+
+
+Task 6 - Symbolic Reconstruction + Term Report
+----------------------------------------------
+6A) Symbolic trace + provenance + report
+./specmon monitor -D SPECMON --symbolic-trace --show-provenance --term-report=term-report-recompute.txt --in wirgeguardTest/server.jsonl --rewrite-with wirgeguardTest/go-rewrite.spthy --pre-trace wirgeguardTest/server-pre-trace.jsonl wirgeguardTest/wireguard.spthy -v
+
+

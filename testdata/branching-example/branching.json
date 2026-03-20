@@ -1,0 +1,2 @@
+{"time":0,"event":{"name":"pair","type":"function","args":[{"name":"choose","type":"function","args":[{"name":"x","type":"constant","value":"0x01"}]},{"name":"pair","type":"function","args":[]}]}}
+{"time":1,"event":{"name":"pair","type":"function","args":[{"name":"bad","type":"function","args":[{"name":"x","type":"constant","value":"0x02"}]},{"name":"pair","type":"function","args":[]}]}}

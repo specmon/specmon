@@ -162,6 +162,9 @@ func KillProcess(pid int) error {
 }
 
 func MedianDuration(numbers []time.Duration) float64 {
+	if len(numbers) == 0 {
+		return 0
+	}
 	sort.Slice(numbers, func(i, j int) bool { return numbers[i] < numbers[j] })
 	middle := len(numbers) / 2
 	if len(numbers)%2 == 0 {

@@ -1,0 +1,8 @@
+theory LongRun
+
+begin
+
+rule In[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+end

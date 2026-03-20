@@ -86,6 +86,9 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 			value := fieldValue.Bool()
 			// Type is already known due to reflection.
 			cmd.PersistentFlags().BoolVarP(fieldValue.Addr().Interface().(*bool), flag, short, value, desc)
+		case reflect.Int:
+			value := int(fieldValue.Int())
+			cmd.PersistentFlags().IntVarP(fieldValue.Addr().Interface().(*int), flag, short, value, desc)
 		case reflect.String:
 			value := fieldValue.String()
 			// Type is already known due to reflection.
@@ -272,4 +275,33 @@ func looksLikeHostPort(s string) bool {
 		}
 	}
 	return true
+}
+
+func isFileInput(path string) bool {
+	// Used for progress/dashboard: only true for real files, not stdin or sockets.
+	if path == "" || path == "-" {
+		return false
+	}
+	if looksLikeHostPort(path) {
+		return false
+	}
+	return true
+}
+
+func countLines(path string) (int, error) {
+	// Count lines in a file to estimate total events for progress displays.
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	count := 0
+	for scanner.Scan() {
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

@@ -1,0 +1,17 @@
+theory LiveMulti
+
+begin
+
+rule BranchA[no-decomp, role="*", trigger=[<choose(x), <>>]]:
+  [ ] --> [ !A(x) ]
+
+rule BranchB[no-decomp, role="*", trigger=[<choose(x), <>>]]:
+  [ ] --> [ !B(x) ]
+
+rule RecvA[no-decomp, role="*", trigger=[<recv(c, m), <>>]]:
+  [ !A(x) ] --> [ ]
+
+rule RecvB[no-decomp, role="*", trigger=[<recv(c, m), <>>]]:
+  [ !B(x) ] --> [ ]
+
+end

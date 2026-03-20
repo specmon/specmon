@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -65,6 +66,7 @@ func DefaultRootConfig() *RootConfig {
 // The command parses a specification, and if requested,
 // performs a filtering and decomposition of the rules.
 func (c *RootConfig) RunE() error {
+	// Parse rules from the spec with role filtering and optional decomposition.
 	rules, selectedRules, decompRules, err := ProcessRules(c.SpecPath, c.Role, c.Decompose, c.Defines)
 	if err != nil {
 		return err
@@ -85,6 +87,8 @@ func (c *RootConfig) RunE() error {
 	}
 	fmt.Println()
 
+	// Build grouping data for summary and verbose rule listings.
+	// Group decomposed rules by their originating base rule name for summary/verbose listings.
 	order, grouped := groupDecomposedRules(selectedRules, decompRules)
 	if c.RuleFilter != "" {
 		order = []string{c.RuleFilter}
@@ -93,35 +97,56 @@ func (c *RootConfig) RunE() error {
 		if c.RuleFilter != "" && len(grouped[c.RuleFilter]) == 0 {
 			return fmt.Errorf("no rules found for base name %q", c.RuleFilter)
 		}
+		// Iterate groups in order for stable output.
 		for i, base := range order {
+			// Fetch all decomposed rules for this base name.
 			group := grouped[base]
 			if len(group) == 0 {
 				continue
 			}
 
+			// Print the group header with a colored base name and count.
 			fmt.Printf("=== %s (%d %s) ===\n\n", ruleColor(i).Sprint(base), len(group), utils.Pluralize("rule", len(group)))
+			// Print each rule body with base name coloring in the first line.
 			for _, r := range group {
 				fmt.Println(utils.Indent(colorizeRuleString(r.String(), ruleColor(i)), 2))
+				// Blank line between rule bodies.
 				fmt.Println()
 			}
 		}
 	} else {
+		// Default summary view: list base rule names with counts only.
 		if c.RuleFilter != "" && len(grouped[c.RuleFilter]) == 0 {
 			return fmt.Errorf("no rules found for base name %q", c.RuleFilter)
 		}
 		fmt.Println("Rules:")
+		// Compute the maximum base name length for aligned output.
 		maxLen := 0
+		// Compute the maximum count width for aligned numeric output.
+		maxCountLen := 0
 		for _, base := range order {
+			// Track the longest base name to align the columns.
 			if len(base) > maxLen {
 				maxLen = len(base)
 			}
+
+			group := grouped[base]
+			countLen := len(strconv.Itoa(len(group)))
+			if countLen > maxCountLen {
+				maxCountLen = countLen
+			}
 		}
+		// Print each base rule with its decomposed rule count.
 		for i, base := range order {
+			// Get the rules for this base name.
 			group := grouped[base]
 			if len(group) == 0 {
 				continue
 			}
-			fmt.Printf("  %-*s : %d %s\n", maxLen, ruleColor(i).Sprint(base), len(group), utils.Pluralize("rule", len(group)))
+			// Format columns before applying color so ANSI escape codes do not break alignment.
+			nameCol := fmt.Sprintf("%-*s", maxLen, base)
+			countCol := fmt.Sprintf("%*d rules", maxCountLen, len(group))
+			fmt.Printf("  %s : %s\n", ruleColor(i).Sprint(nameCol), countCol)
 		}
 		fmt.Println("\nUse --verbose or -v for detailed rule listing")
 	}
@@ -130,46 +155,65 @@ func (c *RootConfig) RunE() error {
 }
 
 func groupDecomposedRules(baseRules []*rule.Rule, decompRules []*rule.Rule) ([]string, map[string][]*rule.Rule) {
+	// Preserve base rule order while grouping decomposed rules under their base names.
+	// Collect base rule names in order.
 	baseNames := make([]string, 0, len(baseRules))
+	// Track base rule names for quick lookup.
 	baseSet := make(map[string]struct{}, len(baseRules))
 	for _, r := range baseRules {
+		// Record the base name for ordering.
 		baseNames = append(baseNames, r.Name)
+		// Record membership for lookup.
 		baseSet[r.Name] = struct{}{}
 	}
 
+	// Start the output order with base rule names.
 	order := append([]string{}, baseNames...)
+	// Track which names are already in order.
 	orderSet := make(map[string]struct{}, len(baseNames))
 	for _, name := range baseNames {
+		// Seed the order set with base rule names.
 		orderSet[name] = struct{}{}
 	}
 
+	// Map base rule name -> list of decomposed rules.
 	grouped := make(map[string][]*rule.Rule)
 	for _, r := range decompRules {
+		// Find the best matching base name for this decomposed rule.
 		base := findBaseName(r.Name, baseNames)
+		// If no base match, treat the rule name as its own base.
 		if base == "" {
 			base = r.Name
 		}
 
+		// Append the rule to its group.
 		grouped[base] = append(grouped[base], r)
+		// If this base name wasn't in the order, append it now.
 		if _, ok := orderSet[base]; !ok {
 			order = append(order, base)
 			orderSet[base] = struct{}{}
 		}
 	}
 
+	// Return the ordered base names and grouped rules.
 	return order, grouped
 }
 
 func findBaseName(ruleName string, baseNames []string) string {
+	// Choose the longest matching base rule prefix for a decomposed rule name.
+	// Track the longest base name that matches this rule.
 	best := ""
 	for _, base := range baseNames {
+		// Match exact name or base prefix with component separator.
 		if ruleName == base || strings.HasPrefix(ruleName, base+rule.ComponentSep) {
+			// Prefer the longest matching base name.
 			if len(base) > len(best) {
 				best = base
 			}
 		}
 	}
 
+	// Return the chosen base name (empty means no match).
 	return best
 }
 
@@ -183,12 +227,15 @@ func ruleColor(index int) *color.Color {
 		color.FgRed,
 	}
 	if color.NoColor || len(palette) == 0 {
+		// Return a no-op color if color output is disabled.
 		return color.New()
 	}
+	// Cycle through the palette for each group index.
 	return color.New(palette[index%len(palette)])
 }
 
 func colorizeRuleString(ruleStr string, c *color.Color) string {
+	// If color is disabled or no color provided, return unchanged.
 	if c == nil || color.NoColor {
 		return ruleStr
 	}
@@ -198,13 +245,18 @@ func colorizeRuleString(ruleStr string, c *color.Color) string {
 		return ruleStr
 	}
 
+	// Only color the name in the leading "rule <name>" prefix.
 	const prefix = "rule "
 	if strings.HasPrefix(lines[0], prefix) {
+		// Strip the prefix to isolate the rule name.
 		rest := strings.TrimPrefix(lines[0], prefix)
+		// Default name end is the full rest of the line.
 		nameEnd := len(rest)
+		// Stop the name at ":" or "[" if present.
 		if idx := strings.IndexAny(rest, "[:"); idx != -1 {
 			nameEnd = idx
 		}
+		// Extract the rule name and reassemble with color.
 		name := rest[:nameEnd]
 		lines[0] = prefix + c.Sprint(name) + rest[nameEnd:]
 	}

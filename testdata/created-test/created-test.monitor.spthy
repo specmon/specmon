@@ -1,0 +1,41 @@
+theory CreatedTest
+
+begin
+
+rule R1[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R2[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R3[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R4[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R5[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R6[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R7[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R8[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R9[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R10[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R11[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule R12[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+end

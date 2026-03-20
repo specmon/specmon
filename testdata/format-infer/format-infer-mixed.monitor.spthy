@@ -1,0 +1,35 @@
+theory FormatInferMixed
+
+begin
+
+rule Init[no-decomp, role="*", trigger=[<init(v), <>>]]:
+  [ ] --> [ ]
+
+rule Recv[no-decomp, role="*", trigger=[<recv(c), m>]]:
+  [ ] --> [ In(m) ]
+
+rule Compute[no-decomp, role="*", trigger=[<compute(m), <>>]]:
+  [ ] --> [ ]
+
+rule Send[no-decomp, role="*", trigger=[<send(m), <>>]]:
+  [ ] --> [ ]
+
+rule Hash[no-decomp, role="*", trigger=[<hash(m), h>]]:
+  [ ] --> [ ]
+
+rule Mac[no-decomp, role="*", trigger=[<mac(m, k), t>]]:
+  [ ] --> [ ]
+
+rule Encrypt[no-decomp, role="*", trigger=[<encrypt(m, k), c>]]:
+  [ ] --> [ ]
+
+rule Decrypt[no-decomp, role="*", trigger=[<decrypt(c, k), m>]]:
+  [ ] --> [ ]
+
+rule Sign[no-decomp, role="*", trigger=[<sign(m, k), s>]]:
+  [ ] --> [ ]
+
+rule Derive[no-decomp, role="*", trigger=[<derive(m), <>>]]:
+  [ ] --> [ ]
+
+end
