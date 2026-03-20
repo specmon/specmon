@@ -121,18 +121,13 @@ type multiplexedReader struct {
 	eventChan chan []byte
 	closeChan chan struct{}
 	closeOnce sync.Once
-	ctx       context.Context
-	cancel    context.CancelFunc
 }
 
 func newMultiplexedReader(listener net.Listener) *multiplexedReader {
-	ctx, cancel := context.WithCancel(context.Background())
 	mr := &multiplexedReader{
 		listener:  listener,
 		eventChan: make(chan []byte, 1000), // Buffer for events
 		closeChan: make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
 	}
 
 	// Start accepting connections in the background
@@ -144,14 +139,14 @@ func newMultiplexedReader(listener net.Listener) *multiplexedReader {
 func (mr *multiplexedReader) acceptConnections() {
 	for {
 		select {
-		case <-mr.ctx.Done():
+		case <-mr.closeChan:
 			return
 		default:
 			conn, err := mr.listener.Accept()
 			if err != nil {
 				select {
-				case <-mr.ctx.Done():
-					return // Context was cancelled, expected error
+				case <-mr.closeChan:
+					return // Listener was closed, expected error
 				default:
 					log.Fatalf("Error accepting connection: %v\n", err)
 					continue
@@ -182,7 +177,7 @@ func (mr *multiplexedReader) handleConnection(conn net.Conn) {
 		select {
 		case mr.eventChan <- event:
 			// Event sent successfully
-		case <-mr.ctx.Done():
+		case <-mr.closeChan:
 			return // Multiplexer is being closed
 		}
 	}
@@ -204,14 +199,13 @@ func (mr *multiplexedReader) Read(p []byte) (n int, err error) {
 		}
 		copy(p, event)
 		return len(event), nil
-	case <-mr.ctx.Done():
+	case <-mr.closeChan:
 		return 0, io.EOF
 	}
 }
 
 func (mr *multiplexedReader) Close() error {
 	mr.closeOnce.Do(func() {
-		mr.cancel()
 		mr.listener.Close()
 		close(mr.closeChan)
 	})
