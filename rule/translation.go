@@ -20,6 +20,7 @@ package rule
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/specmon/specmon/data"
@@ -70,14 +71,18 @@ func BuildDAGForRule(r *Rule) *TermNode {
 //  1. The LHS contains all facts from the LHS of r.
 //  2. The RHS contains a fact with all variables from the RHS of r
 //     and pre-facts from function symbols of depth n.
-func GenerateStartRule(r *Rule, D *TermNode) *Rule {
+func GenerateStartRule(r *Rule, D *TermNode, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
 	ruleVars := nonPublicRuleVars(r)
 
 	rhs := make([]*Fact, len(D.Leaves()))
 	hints := make([]term.Term, len(D.Leaves()))
 	for i, leaf := range D.Leaves() {
 		f := term.Must(term.AsFunction(leaf.Value()))
-		rhs[i] = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, f.Name), []term.Term{
+		termName := f.Name
+		if !strings.HasSuffix(termName, PreFactSuffix) {
+			termName = termNameForNode(names, original, leaf)
+		}
+		rhs[i] = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
 			term.NewFunction(term.PairFunctionName, ruleVars),
 		},
 			LinearFact,
@@ -111,15 +116,14 @@ func GenerateStartRule(r *Rule, D *TermNode) *Rule {
 // GenerateEndRule returns a new rule with the following properties:
 //
 //	TODO
-func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding) *Rule {
+func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
 	ruleVars := term.AsTerms(utils.Unique(Facts(r.RHS).Vars()))
 
 	lhs := make([]*Fact, D.Roots()[0].Children().Size())
 	for i, d := range D.Roots()[0].Children().AsSlice() {
-		f := term.Must(term.AsFunction(d.Value()))
-
 		u := U[d]
-		g := NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, nameForTerm(f)), []term.Term{
+		termName := termNameForNode(names, original, d)
+		g := NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
 			term.NewFunction(term.PairFunctionName, ruleVars),
 		}, LinearFact)
 
@@ -154,7 +158,7 @@ func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding)
 		}
 
 		if d.Parents().Size() > 1 {
-			g.Name = fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, nameForTerm(f), u)
+			g.Name = fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, u)
 		}
 
 		lhs[i] = g
@@ -245,14 +249,14 @@ func BuildDAG(n *TermNode) {
 	}
 }
 
-func LabelSubterms(n *TermNode, b *term.Binding) {
+func LabelSubterms(n *TermNode, b *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) {
 	for _, c := range n.Children().AsSlice() {
-		ret := term.NewVariable(nameForTerm(c.Value()))
+		ret := term.NewVariable(names.NameForTerm(originalTerm(original, c)))
 
 		n.AddChildrenWithLabel(ret, c)
-		b.Set(c.Value(), ret)
+		b.Set(originalTerm(original, c), ret)
 
-		LabelSubterms(c, b)
+		LabelSubterms(c, b, names, original)
 	}
 }
 
@@ -278,29 +282,36 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 		return []*Rule{r}
 	}
 
-	// Build a dependecny graph for the rule r.
-	// Work on a copy of r do avoid modifying the original rule.
+	// Build a dependency graph for the rule r.
+	// Work on a copy of r to avoid modifying the original rule.
 	D := BuildDAGForRule(r.Clone())
 
-	// emove constants and varibles from D.
+	// Remove constants and variables from D.
 	RemoveConstants(D)
 	RemoveVariables(D)
 
-	// Label subterms with variables.
-	F := term.NewBinding()
-	LabelSubterms(D, F)
-
-	// Keep mapping of subterms to variables prior to substitution.
-	O := term.NewBinding()
-	LabelSubterms(D, O)
-
-	// Replace subterms with variables.
-	ReplaceSubterms(D, F)
-
-	// If the depth of the DAG is 0, we don't need to do anything.
+	// If the depth of the DAG is 0, no decomposition is needed.
 	if D.Depth() == 0 {
 		return []*Rule{r}
 	}
+
+	names := NewNameGenerator(r)
+
+	// snapshotTerms captures the current Value() of each DAG node before
+	// LabelSubterms/ReplaceSubterms mutate them. Pointer identity of
+	// *TermNode keys is stable because DAG operations don't reallocate
+	// existing nodes.
+	original := snapshotTerms(D)
+
+	// Label subterms with variables.
+	F := term.NewBinding()
+	LabelSubterms(D, F, names, original)
+
+	// Keep mapping of subterms to variables prior to substitution.
+	O := F.Clone()
+
+	// Replace subterms with variables.
+	ReplaceSubterms(D, F)
 
 	// If the depth of the DAG is 1, we only need to add
 	// the required triggers.
@@ -313,6 +324,12 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 			}
 		}
 
+		// Sort triggers so the output is deterministic regardless of
+		// the order that RHS/Act facts were listed in the original rule.
+		sort.Slice(triggers, func(i, j int) bool {
+			return triggers[i].String() < triggers[j].String()
+		})
+
 		R := r.Clone()
 		R.Attrs[TriggerAttributeName] = TermAttribute{triggers}
 
@@ -320,15 +337,15 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 	}
 
 	// Add pre facts
-	AddPreFacts(D)
+	AddPreFacts(D, names, original)
 
 	var R []*Rule
 	U := make(map[*TermNode]int)
 
 	// Generate rules for the DAG.
-	R = append(R, GenerateStartRule(r, D))
-	R = append(R, GenerateMidRules(r, D, U, O)...)
-	R = append(R, GenerateEndRule(r, D, U, F))
+	R = append(R, GenerateStartRule(r, D, names, original))
+	R = append(R, GenerateMidRules(r, D, U, O, names, original)...)
+	R = append(R, GenerateEndRule(r, D, U, F, names, original))
 
 	// Prefix generated rule names with the name of rule r.
 	var count int
@@ -371,7 +388,7 @@ func RemoveConstants(D *TermNode) *TermNode {
 	return D
 }
 
-func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding) []*Rule {
+func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) []*Rule {
 	var rules []*Rule
 
 	ruleVarsNonPublic := nonPublicRuleVars(r)
@@ -405,15 +422,16 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 		rhs := make([]*Fact, d.Parents().Size())
 		for i := range d.Parents().AsSlice() {
 			var g *Fact
+			termName := termNameForNode(names, original, d)
 			if d.Parents().Size() > 1 {
-				g = NewFact(fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, nameForTerm(f), i), []term.Term{
+				g = NewFact(fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, i), []term.Term{
 					// Include all variables of the rule in the fact.
 					// Then, we don't have to add varsFacts for intermediate rules.
 					term.NewFunction(term.PairFunctionName, fVars),
 					term.NewFunction(f.Name, f.Args),
 				}, LinearFact)
 			} else {
-				g = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, nameForTerm(f)), []term.Term{
+				g = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
 					// Include all variables of the rule in the fact.
 					// Then, we don't have to add varsFacts for intermediate rules.
 					term.NewFunction(term.PairFunctionName, fVars),
@@ -456,7 +474,7 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 			// and can be used directly.
 			fName := f.Name
 			if !strings.HasSuffix(fName, PreFactSuffix) {
-				fName = nameForTerm(f)
+				fName = termNameForNode(names, original, c)
 			}
 
 			factName := fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, fName)
@@ -494,13 +512,14 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 }
 
 // AddPreFacts adds Pre facts for all leave nodes that are observable.
-func AddPreFacts(D *TermNode) *TermNode {
+func AddPreFacts(D *TermNode, names *NameGenerator, original map[*TermNode]term.Term) *TermNode {
 	D.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, w term.Term, _ int) bool {
 		// If the node is a leaf, we add a pre fact.
 		// w != nil ensures that we don't run into an endless loop.
 		if d.Children().Empty() && w != nil {
 			f := term.Must(term.AsFunction(d.Value()))
-			g := term.NewFunction(nameForTerm(f)+"_Pre", term.AsTerms(term.Terms(f.Args).Vars()))
+			name := names.NameForTerm(originalTerm(original, d))
+			g := term.NewFunction(name+"_Pre", term.AsTerms(term.Terms(f.Args).Vars()))
 			d.AddChildren(data.NewDAGNode[term.Term, term.Term](g))
 		}
 
@@ -516,24 +535,36 @@ func FindTerm(n *TermNode, arg term.Term) *TermNode {
 	})
 }
 
-// nameForTerm returns a string representation of a term.
-// It is used to generate unique names for return values of functions.
-func nameForTerm(t term.Term) string {
-	switch t := t.(type) {
-	case *term.Function:
-		s := t.Name
-
-		for _, a := range t.Args {
-			s += nameForTerm(a)
+func snapshotTerms(D *TermNode) map[*TermNode]term.Term {
+	original := make(map[*TermNode]term.Term)
+	D.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, _ term.Term, _ int) bool {
+		if d != nil && d.Value() != nil {
+			original[d] = d.Value()
 		}
+		return true
+	})
+	return original
+}
 
-		return s
-	case *term.Variable:
-		return t.Name
-	// Constants are handled by the default case.
-	default:
-		return strings.ReplaceAll(t.String(), "'", "")
+func originalTerm(original map[*TermNode]term.Term, node *TermNode) term.Term {
+	if node == nil {
+		return nil
 	}
+	if t, ok := original[node]; ok {
+		return t
+	}
+	return node.Value()
+}
+
+func termNameForNode(names *NameGenerator, original map[*TermNode]term.Term, node *TermNode) string {
+	if names == nil {
+		return ""
+	}
+	t := originalTerm(original, node)
+	if t == nil {
+		return ""
+	}
+	return names.NameForTerm(t)
 }
 
 func nonPublicRuleVars(r *Rule) []term.Term {

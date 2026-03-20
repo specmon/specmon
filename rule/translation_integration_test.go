@@ -2,6 +2,7 @@ package rule_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/specmon/specmon/cmd"
 	"github.com/specmon/specmon/parser"
 	"github.com/specmon/specmon/rule"
+	"github.com/specmon/specmon/term"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,6 +54,144 @@ func TestTranslationFromFiles(t *testing.T) {
 			assertRulesEqual(t, expectedRules, actualRules)
 		})
 	}
+}
+
+// TestTranslateOrderIndependent verifies that reordering RHS facts in a rule
+// produces identical decomposed output. This is an end-to-end regression test
+// for naming stability through the full Translate pipeline.
+//
+// Mid-rule numbering (R_0, R_1, ...) depends on DAG traversal order and may
+// differ between orderings, so we compare rule bodies after stripping the
+// rule name from each string representation.
+func TestTranslateOrderIndependent(t *testing.T) {
+	t.Parallel()
+
+	m := term.NewVariable("m")
+	k := term.NewVariable("k")
+	hashM := term.NewFunction("hash", []term.Term{m})
+	hmacK := term.NewFunction("hmac", []term.Term{k})
+	lenHashM := term.NewFunction("len", []term.Term{hashM})
+
+	lhs := []*rule.Fact{
+		rule.NewFact("State0", []term.Term{m, k}, rule.LinearFact),
+	}
+
+	// Order A: Out(len(hash(m))) before Out(hmac(k)).
+	rA := &rule.Rule{
+		Name: "R",
+		LHS:  lhs,
+		Act:  []*rule.Fact{},
+		RHS: []*rule.Fact{
+			rule.NewFact("Out", []term.Term{lenHashM}, rule.LinearFact),
+			rule.NewFact("Out2", []term.Term{hmacK}, rule.LinearFact),
+			rule.NewFact("State1", []term.Term{m, k}, rule.LinearFact),
+		},
+		Attrs: make(map[string]rule.Attribute),
+	}
+
+	// Order B: Out(hmac(k)) before Out(len(hash(m))).
+	rB := &rule.Rule{
+		Name: "R",
+		LHS:  lhs,
+		Act:  []*rule.Fact{},
+		RHS: []*rule.Fact{
+			rule.NewFact("Out2", []term.Term{hmacK}, rule.LinearFact),
+			rule.NewFact("Out", []term.Term{lenHashM}, rule.LinearFact),
+			rule.NewFact("State1", []term.Term{m, k}, rule.LinearFact),
+		},
+		Attrs: make(map[string]rule.Attribute),
+	}
+
+	rulesA := rule.Translate(rA)
+	rulesB := rule.Translate(rB)
+
+	require.Len(t, rulesB, len(rulesA), "Different number of decomposed rules")
+
+	// Compare the set of rule bodies, ignoring mid-rule numbering.
+	bodiesA := normalizedRuleBodies(rulesA)
+	bodiesB := normalizedRuleBodies(rulesB)
+
+	sort.Strings(bodiesA)
+	sort.Strings(bodiesB)
+
+	require.Equal(t, bodiesA, bodiesB,
+		"Decomposed rule bodies differ between RHS orderings")
+}
+
+// TestTranslateDepth1OrderIndependent verifies that reordering RHS facts in a
+// depth-1 rule (single-level function applications, no mid-rules) produces
+// identical trigger attributes regardless of fact ordering.
+func TestTranslateDepth1OrderIndependent(t *testing.T) {
+	t.Parallel()
+
+	m := term.NewVariable("m")
+	k := term.NewVariable("k")
+	hashM := term.NewFunction("hash", []term.Term{m})
+	hmacK := term.NewFunction("hmac", []term.Term{k})
+
+	lhs := []*rule.Fact{
+		rule.NewFact("State0", []term.Term{m, k}, rule.LinearFact),
+	}
+
+	// Order A: Out(hash(m)) before Out(hmac(k)).
+	rA := &rule.Rule{
+		Name: "R",
+		LHS:  lhs,
+		Act:  []*rule.Fact{},
+		RHS: []*rule.Fact{
+			rule.NewFact("Out", []term.Term{hashM}, rule.LinearFact),
+			rule.NewFact("Out2", []term.Term{hmacK}, rule.LinearFact),
+			rule.NewFact("State1", []term.Term{m, k}, rule.LinearFact),
+		},
+		Attrs: make(map[string]rule.Attribute),
+	}
+
+	// Order B: Out(hmac(k)) before Out(hash(m)).
+	rB := &rule.Rule{
+		Name: "R",
+		LHS:  lhs,
+		Act:  []*rule.Fact{},
+		RHS: []*rule.Fact{
+			rule.NewFact("Out2", []term.Term{hmacK}, rule.LinearFact),
+			rule.NewFact("Out", []term.Term{hashM}, rule.LinearFact),
+			rule.NewFact("State1", []term.Term{m, k}, rule.LinearFact),
+		},
+		Attrs: make(map[string]rule.Attribute),
+	}
+
+	rulesA := rule.Translate(rA)
+	rulesB := rule.Translate(rB)
+
+	require.Len(t, rulesA, 1, "Depth-1 decomposition should produce a single rule")
+	require.Len(t, rulesB, 1, "Depth-1 decomposition should produce a single rule")
+
+	// The RHS fact ordering faithfully mirrors the original rule, so it may
+	// differ. What must be stable is the trigger attribute.
+	trigA := rulesA[0].Attrs[rule.TriggerAttributeName]
+	trigB := rulesB[0].Attrs[rule.TriggerAttributeName]
+	require.Equal(t, fmt.Sprint(trigA), fmt.Sprint(trigB),
+		"Depth-1 trigger attributes differ between RHS orderings")
+}
+
+// normalizedRuleBodies strips the rule name from each rule's string
+// representation so that mid-rule numbering (R_0 vs R_1) does not
+// affect comparison. The attributes, facts, and generated variable
+// names are preserved.
+func normalizedRuleBodies(rules []*rule.Rule) []string {
+	bodies := make([]string, len(rules))
+	for i, r := range rules {
+		s := r.String()
+		// Format: "rule NAME ...:\n  body"
+		// Strip "rule NAME" prefix, keep attributes and body.
+		if idx := strings.Index(s, " ["); idx >= 0 {
+			bodies[i] = s[idx:]
+		} else if idx := strings.Index(s, ":\n"); idx >= 0 {
+			bodies[i] = s[idx:]
+		} else {
+			bodies[i] = s
+		}
+	}
+	return bodies
 }
 
 // assertRulesEqual compares two rule slices, handling ordering and formatting differences.

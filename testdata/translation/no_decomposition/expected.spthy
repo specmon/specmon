@@ -3,7 +3,7 @@ begin
 
 rule SimpleRule:
   [ State0(x) ] 
-  --> 
+  -->
   [ State1(x) ]
 
 end

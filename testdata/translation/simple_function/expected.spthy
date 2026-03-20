@@ -1,24 +1,25 @@
 theory SimpleFunction
 begin
 
-rule TestRule_Start [ hint=[<hash(m), hashm>] ]:
-  [ State0(m) ] 
+rule TestRule_Start [ hint=[<hash(m), h_m>] ]:
+  [ State0(m) ]
   -->
-  [ ST_TestRule_hashm_Pre(<m>) ]
+  [ ST_TestRule_h_m_Pre(<m>) ]
 
-rule TestRule_0 [ trigger=[<len(hashm), lenhashm>] ]:
-  [ ST_TestRule_hashm(<m>, hashm) ] 
+rule TestRule_0 [ trigger=[<len(h_m), l_h_m>] ]:
+  [ ST_TestRule_h_m(<m>, h_m) ]
   -->
-  [ ST_TestRule_lenhashm(<m>, len(hashm)) ]
+  [ ST_TestRule_l_h_m(<m>, len(h_m)) ]
 
-rule TestRule_1 [ trigger=[<hash(m), hashm>] ]:
-  [ ST_TestRule_hashm_Pre(<m>) ] 
+rule TestRule_1 [ trigger=[<hash(m), h_m>] ]:
+  [ ST_TestRule_h_m_Pre(<m>) ]
   -->
-  [ ST_TestRule_hashm(<m>, hash(m)) ]
+  [ ST_TestRule_h_m(<m>, hash(m)) ]
 
 rule TestRule_End:
-  [ ST_TestRule_lenhashm(<m>, lenhashm) ] 
+  [ ST_TestRule_l_h_m(<m>, l_h_m) ]
   -->
-  [ Out(lenhashm), State1(m) ]
+  [ Out(l_h_m)
+  , State1(m) ]
 
 end
