@@ -1,9 +1,10 @@
 theory NoDecompAttribute
 begin
 
-rule TestRule [no-decomp]:
+rule TestRule [ no-decomp ]:
   [ State0(m) ] 
-  --> 
-  [ Out(len(hash(m))), State1(m) ]
+  -->
+  [ Out(len(hash(m)))
+  , State1(m) ]
 
 end
