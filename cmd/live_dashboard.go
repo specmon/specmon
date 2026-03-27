@@ -13,9 +13,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fatih/color"
-	log "github.com/sirupsen/logrus"
 	"github.com/specmon/specmon/monitor"
 	"github.com/specmon/specmon/term"
+)
+
+const (
+	liveDefaultWidth       = 80
+	liveMinWidth           = 60
+	liveProgressBarWidth   = 20
+	liveCompactPageSize    = 5
+	liveDetailedPageSize   = 10
+	liveEventAreaStartLine = 12
+	liveTickInterval       = 200 * time.Millisecond
+	liveMemRefreshInterval = 2 * time.Second
+	livePausePollInterval  = 50 * time.Millisecond
+	liveDefaultHistory     = 2000
 )
 
 type liveEventMsg struct {
@@ -44,6 +56,7 @@ type liveModel struct {
 	start        time.Time
 	pauseAt      time.Time
 	pausedFor    time.Duration
+	lastMemRead  time.Time
 	count        int
 	total        int
 	configs      int
@@ -80,6 +93,7 @@ func newLiveModel(specPath string, start time.Time, configs int, total int, paus
 	return liveModel{
 		specPath:     specPath,
 		start:        start,
+		lastMemRead:  start,
 		total:        total,
 		configs:      configs,
 		status:       "Running",
@@ -93,6 +107,7 @@ func (m liveModel) Init() tea.Cmd {
 	return liveTick()
 }
 
+//nolint:ireturn // Bubble Tea requires tea.Model as the Update return type.
 func (m liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle key presses, ticks, and incoming events for the dashboard.
 	switch v := msg.(type) {
@@ -186,9 +201,12 @@ func (m liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, liveTick()
 		}
 		m.elapsed = time.Since(m.start) - m.pausedFor
-		var stats runtime.MemStats
-		runtime.ReadMemStats(&stats)
-		m.memMB = float64(stats.Alloc) / (1024 * 1024)
+		if m.lastMemRead.IsZero() || time.Since(m.lastMemRead) >= liveMemRefreshInterval {
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			m.memMB = float64(stats.Alloc) / (1024 * 1024)
+			m.lastMemRead = time.Now()
+		}
 		if m.done {
 			return m, nil
 		}
@@ -239,10 +257,10 @@ func (m liveModel) View() string {
 	// Render the dashboard UI into a boxed layout.
 	width := m.width
 	if width <= 0 {
-		width = 80
+		width = liveDefaultWidth
 	}
-	if width < 60 {
-		width = 60
+	if width < liveMinWidth {
+		width = liveMinWidth
 	}
 	inner := width - 2
 
@@ -333,7 +351,7 @@ func (m liveModel) progressLine() string {
 	if m.total <= 0 {
 		return fmt.Sprintf("Events Processed: %d", m.count)
 	}
-	barWidth := 20
+	barWidth := liveProgressBarWidth
 	percent := float64(m.count) / float64(m.total)
 	if percent > 1 {
 		percent = 1
@@ -352,7 +370,7 @@ func (m liveModel) lastHeader() string {
 }
 
 func (m liveModel) eventAreaBounds() (int, int) {
-	start := 12
+	start := liveEventAreaStartLine
 	visible := len(m.visibleEntries())
 	if visible == 0 {
 		visible = 1
@@ -390,9 +408,9 @@ func (m liveModel) visibleEntries() []liveEntry {
 func (m liveModel) pageSize() int {
 	// Page size depends on details mode.
 	if m.details {
-		return 10
+		return liveDetailedPageSize
 	}
-	return 5
+	return liveCompactPageSize
 }
 
 func (m liveModel) maxScrollOffset() int {
@@ -430,15 +448,16 @@ func (m *liveModel) jumpTo() {
 			break
 		}
 	}
-	if pos >= 0 {
+	switch {
+	case pos >= 0:
 		limit := m.pageSize()
 		m.scrollOffset = max(0, len(m.entries)-limit-pos)
 		m.infoMsg = ""
-	} else if oldest > 0 && target < oldest {
+	case oldest > 0 && target < oldest:
 		m.infoMsg = fmt.Sprintf("History limit: oldest event %d. Use --increase-history N", oldest)
-	} else if newest > 0 && target > newest {
+	case newest > 0 && target > newest:
 		m.infoMsg = fmt.Sprintf("History limit: newest event %d. Use --increase-history N", newest)
-	} else {
+	default:
 		m.infoMsg = "Event not in history buffer. Use --increase-history N"
 	}
 	m.jumpMode = false
@@ -552,7 +571,7 @@ func truncateANSIVisible(s string, maxVisible int) (string, int) {
 
 func liveTick() tea.Cmd {
 	// Schedule a periodic tick for UI updates.
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(liveTickInterval, func(t time.Time) tea.Msg {
 		return liveTickMsg{t}
 	})
 }
@@ -570,52 +589,28 @@ func runLiveMonitor(
 	// Run the live dashboard and stream monitor events into it.
 	start := time.Now()
 	loader := startLoadingIndicator(true, "Preparing Live Dashboard...")
-	total := estimateTotalEvents(r, role, decompose, defines)
+	total := estimateTotalEvents(r)
 	historyLimit := r.LiveHistory
 	if historyLimit <= 0 {
-		historyLimit = 2000
+		historyLimit = liveDefaultHistory
 	}
 	var pauseFlag uint32
-	m.SetPauseFlag(&pauseFlag)
 	program := tea.NewProgram(
 		newLiveModel(specPath, start, len(m.Configs()), total, &pauseFlag, historyLimit),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 
-	logger := log.StandardLogger()
-	originalExit := logger.ExitFunc
-	originalOut := logger.Out
-	logger.SetOutput(io.Discard)
-	logger.ExitFunc = func(code int) {
-		program.Send(liveErrorMsg{message: fmt.Sprintf("monitor exited with code %d (see stderr)", code)})
-		program.Send(liveDoneMsg{})
-		runtime.Goexit()
+	viewOpts := monitorViewOptions{
+		showAllEvents:  r.ShowAll,
+		showAllCfgs:    r.ShowAllCfgs,
+		traceConfig:    r.TraceConfig,
+		maxSuggestions: r.MaxSuggestions,
 	}
-	defer func() {
-		logger.ExitFunc = originalExit
-		logger.SetOutput(originalOut)
-	}()
-
-	m.SetErrorHandler(func(line int, event term.Term, details string) {
-		lineText := strconv.Itoa(line)
-		reason := ""
-		for _, ln := range strings.Split(details, "\n") {
-			if strings.HasPrefix(ln, "  Reason: ") {
-				reason = strings.TrimPrefix(ln, "  Reason: ")
-				break
-			}
-		}
-		program.Send(liveErrorMsg{
-			message: fmt.Sprintf("Line %d: %s", line, reason),
-			line:    lineText,
-			event:   event.String(),
-			reason:  reason,
-			details: compactErrorDetails(details),
-		})
-	})
+	processErrs := make(chan *monitor.ProcessError, 1)
 
 	go func() {
+		defer close(processErrs)
 		// Stream events to the dashboard, respecting rewrite and pre-trace modes.
 		count := 0
 		send := func(event term.Term) {
@@ -650,8 +645,21 @@ func runLiveMonitor(
 				defer preTrace.Close()
 
 				events := monitor.ParseEvents(preTrace, pid)
-				_, consumedPre := m.ProcessEvents(events, false, pid)
+				_, consumedPre, preErrs := m.ProcessEvents(events, false, pid)
 				consumeWithPause(consumedPre, &pauseFlag, send)
+				if procErr := waitProcessError(preErrs); procErr != nil {
+					details := m.BuildNoApplicableRuleDetails(procErr.Event, procErr.Line, viewOpts.showAllCfgs, viewOpts.traceConfig)
+					program.Send(liveErrorMsg{
+						message: fmt.Sprintf("Line %d: %s", details.Line, details.Reason),
+						line:    strconv.Itoa(details.Line),
+						event:   details.Event.String(),
+						reason:  details.Reason,
+						details: compactErrorDetails(formatNoApplicableRule(details, viewOpts.showAllEvents, viewOpts.maxSuggestions)),
+					})
+					processErrs <- procErr
+					program.Send(liveDoneMsg{})
+					return
+				}
 			}
 
 			rewriter, err := monitor.NewMonitor(rewriteRules)
@@ -661,15 +669,28 @@ func runLiveMonitor(
 				program.Send(liveDoneMsg{})
 				return
 			}
-			rewriter.SetShowAllEvents(r.ShowAll)
-			rewriter.SetTraceConfig(r.TraceConfig)
-			rewriter.SetShowAllConfigs(r.ShowAllCfgs)
-			rewriter.SetPauseFlag(&pauseFlag)
-
 			rewriterEvents := monitor.ParseEvents(eventSource, pid)
-			outs, _ := rewriter.ProcessEvents(rewriterEvents, true, pid)
-			_, consumedEvents := m.ProcessEvents(outs, false, pid)
+			outs, _, rewriteErrs := rewriter.ProcessEvents(rewriterEvents, true, pid)
+			_, consumedEvents, liveErrs := m.ProcessEvents(outs, false, pid)
 			consumeWithPause(consumedEvents, &pauseFlag, send)
+			if procErr := waitProcessError(rewriteErrs); procErr != nil {
+				processErrs <- procErr
+				program.Send(liveDoneMsg{})
+				return
+			}
+			if procErr := waitProcessError(liveErrs); procErr != nil {
+				details := m.BuildNoApplicableRuleDetails(procErr.Event, procErr.Line, viewOpts.showAllCfgs, viewOpts.traceConfig)
+				program.Send(liveErrorMsg{
+					message: fmt.Sprintf("Line %d: %s", details.Line, details.Reason),
+					line:    strconv.Itoa(details.Line),
+					event:   details.Event.String(),
+					reason:  details.Reason,
+					details: compactErrorDetails(formatNoApplicableRule(details, viewOpts.showAllEvents, viewOpts.maxSuggestions)),
+				})
+				processErrs <- procErr
+				program.Send(liveDoneMsg{})
+				return
+			}
 		} else {
 			source := io.Reader(eventSource)
 			if r.PreTrace != "" {
@@ -685,8 +706,21 @@ func runLiveMonitor(
 			}
 
 			events := monitor.ParseEvents(source, pid)
-			_, consumed := m.ProcessEvents(events, false, pid)
+			_, consumed, errs := m.ProcessEvents(events, false, pid)
 			consumeWithPause(consumed, &pauseFlag, send)
+			if procErr := waitProcessError(errs); procErr != nil {
+				details := m.BuildNoApplicableRuleDetails(procErr.Event, procErr.Line, viewOpts.showAllCfgs, viewOpts.traceConfig)
+				program.Send(liveErrorMsg{
+					message: fmt.Sprintf("Line %d: %s", details.Line, details.Reason),
+					line:    strconv.Itoa(details.Line),
+					event:   details.Event.String(),
+					reason:  details.Reason,
+					details: compactErrorDetails(formatNoApplicableRule(details, viewOpts.showAllEvents, viewOpts.maxSuggestions)),
+				})
+				processErrs <- procErr
+				program.Send(liveDoneMsg{})
+				return
+			}
 		}
 
 		program.Send(liveDoneMsg{})
@@ -694,51 +728,35 @@ func runLiveMonitor(
 
 	stopLoadingIndicator(loader)
 	_, runErr := program.Run()
-	return runErr
+	if runErr != nil {
+		return runErr
+	}
+	if procErr := waitProcessError(processErrs); procErr != nil {
+		return procErr.Err
+	}
+	return nil
 }
 
-func consumeWithPause(ch <-chan *monitor.ConsumedEvent, pauseFlag *uint32, send func(term.Term)) {
+func consumeWithPause(ch <-chan term.Term, pauseFlag *uint32, send func(term.Term)) {
 	// Pause event consumption when the dashboard requests it.
 	for {
 		if atomic.LoadUint32(pauseFlag) == 1 {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(livePausePollInterval)
 			continue
 		}
 		event, ok := <-ch
 		if !ok {
 			return
 		}
-		send(event.Term)
-		event.Done()
+		send(event)
 	}
 }
 
-func estimateTotalEvents(r *MonitorConfig, role string, decompose bool, defines []string) int {
+func estimateTotalEvents(r *MonitorConfig) int {
 	// Estimate total events for the dashboard progress bar.
-	if r.RewriteWith != "" {
-		// For rewrite mode with file input, compute a better total:
-		// pre-trace parsed events + emitted rewrite events from live input.
-		total := 0
-		if r.PreTrace != "" && isFileInput(r.PreTrace) {
-			if n, err := countParsedEvents(r.PreTrace); err == nil {
-				total += n
-			}
-		}
-		if r.In != "" && isFileInput(r.In) {
-			if n, err := countRewriteOutputs(r.In, r.RewriteWith, role, decompose, defines, r); err == nil {
-				total += n
-				return total
-			}
-		}
-		if total > 0 {
-			return total
-		}
-		return 0
-	}
-
 	total := 0
 	if r.PreTrace != "" && isFileInput(r.PreTrace) {
-		if n, err := countLines(r.PreTrace); err == nil {
+		if n, err := countParsedEvents(r.PreTrace); err == nil {
 			total += n
 		}
 	}
@@ -761,50 +779,6 @@ func countParsedEvents(path string) (int, error) {
 		n++
 	}
 	return n, nil
-}
-
-func countRewriteOutputs(inputPath, rewritePath, role string, decompose bool, defines []string, r *MonitorConfig) (int, error) {
-	rewriteRules, _, _, err := ProcessRules(rewritePath, role, decompose, defines)
-	if err != nil {
-		return 0, err
-	}
-	rw, err := monitor.NewMonitor(rewriteRules)
-	if err != nil {
-		return 0, err
-	}
-	rw.SetShowAllEvents(r.ShowAll)
-	rw.SetTraceConfig(r.TraceConfig)
-	rw.SetShowAllConfigs(r.ShowAllCfgs)
-
-	f, err := os.Open(inputPath)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	events := monitor.ParseEvents(f, -1)
-	outs, _ := rw.ProcessEvents(events, true, -1)
-	n := 0
-	for range outs {
-		n++
-	}
-	return n, nil
-}
-
-func min(a, b int) int {
-	// Small helpers for layout math.
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	// Small helpers for layout math.
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func errorMarker() string {

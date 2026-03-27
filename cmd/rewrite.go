@@ -76,7 +76,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 
 	events := monitor.ParseEvents(eventSource, -1)
-	outs, _ := m.ProcessEvents(events, true, -1)
+	outs, _, errs := m.ProcessEvents(events, true, -1)
 
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {
@@ -100,6 +100,9 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("cannot write to out file: %w", err)
 		}
+	}
+	if procErr := waitProcessError(errs); procErr != nil {
+		return procErr.Err
 	}
 
 	return nil

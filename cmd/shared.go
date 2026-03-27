@@ -129,6 +129,7 @@ type multiplexedReader struct {
 }
 
 func newMultiplexedReader(listener net.Listener) *multiplexedReader {
+	//nolint:gosec // cancel is stored on the reader and called from Close.
 	ctx, cancel := context.WithCancel(context.Background())
 	mr := &multiplexedReader{
 		listener:  listener,

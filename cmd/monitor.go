@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,7 @@ type MonitorConfig struct {
 	ShowAll            bool   `flag:"show-all-events"        desc:"show all expected events without truncation"`
 	TraceConfig        int    `flag:"trace-config"           desc:"show only a specific configuration (1-based)"`
 	ShowAllCfgs        bool   `flag:"show-all-configs"       desc:"show expected events for all configurations"`
+	MaxSuggestions     int    `flag:"max-suggestions"        desc:"maximum expected events shown per event-name group (default: 10)"`
 	Live               bool   `flag:"live"                   desc:"show live dashboard"`
 	LiveHistory        int    `flag:"increase-history"       desc:"increase live history size (default: 2000)"`
 	Progress           bool   `flag:"progress"               desc:"show progress bar for batch inputs"`
@@ -80,7 +82,20 @@ type MonitorConfig struct {
 	DetectCrypto       bool   `flag:"detect-crypto"           desc:"auto-detect crypto operations (default: true)"`
 }
 
+func defaultMonitorConfig() MonitorConfig {
+	return MonitorConfig{
+		MaxSuggestions: 10,
+		LiveHistory:    2000,
+		MinComponent:   2,
+		MaxComponents:  10,
+		Confidence:     "MEDIUM",
+		DetectCrypto:   true,
+	}
+}
+
 // RunE runs the monitor subcommand.
+//
+//nolint:gocyclo // This command intentionally orchestrates multiple modes in one entrypoint.
 func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	quiet, _ := cmd.Root().Flags().GetBool("quiet")
 	pid, err := cmd.Root().Flags().GetInt("pid")
@@ -129,9 +144,6 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
-	m.SetShowAllEvents(r.ShowAll)
-	m.SetTraceConfig(r.TraceConfig)
-	m.SetShowAllConfigs(r.ShowAllCfgs)
 	if r.Live {
 		// Live UI mode is a separate path (Task 4).
 		return runLiveMonitor(r, m, specPath, eventSource, role, decompose, defines, pid)
@@ -142,15 +154,16 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	analysisMode := inferEnabled || symbolicEnabled
 	progressEnabled := r.Progress && !verbose && !inferEnabled && !symbolicEnabled
 	var progressErrLine atomic.Int64
-	if progressEnabled {
-		m.SetErrorHandler(func(line int, _ term.Term, _ string) {
-			progressErrLine.CompareAndSwap(0, int64(line))
-		})
+	viewOpts := monitorViewOptions{
+		showAllEvents:  r.ShowAll,
+		showAllCfgs:    r.ShowAllCfgs,
+		traceConfig:    r.TraceConfig,
+		maxSuggestions: r.MaxSuggestions,
 	}
-	printProgressError := func() bool {
+	printProgressError := func() error {
 		line := progressErrLine.Load()
 		if line == 0 {
-			return false
+			return nil
 		}
 		headline := "✗ ERROR"
 		if !color.NoColor {
@@ -158,7 +171,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("\n%s Monitoring failed at line %d\n", headline, line)
 		fmt.Println("  Run again without --progress to see full error details.")
-		return true
+		return monitor.ErrNoApplicableRule
 	}
 	inferOpts := inferOptions{
 		minComponentLength: r.MinComponent,
@@ -186,6 +199,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 		count := 1
 		var collected []eventInfo
+		var inferState inferStreamState
 		start := time.Now()
 		var loader *loadingIndicator
 		if analysisMode {
@@ -209,10 +223,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if isFileInput(r.In) {
-				liveTotal, err = countRewriteOutputs(r.In, r.RewriteWith, role, decompose, defines, r)
-				if err != nil || liveTotal <= 0 {
-					liveTotal, _ = countLines(r.In)
-				}
+				liveTotal, _ = countLines(r.In)
 			}
 			stopLoadingIndicator(loader)
 		}
@@ -226,21 +237,26 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 			defer preTrace.Close()
 
 			events := monitor.ParseEvents(preTrace, pid)
-			_, consumedPre := m.ProcessEvents(events, false, pid)
+			_, consumedPre, preErrs := m.ProcessEvents(events, false, pid)
 			// Inference/symbolic collects events; progress shows a bar; otherwise print.
-			if inferEnabled || symbolicEnabled {
+			switch {
+			case inferEnabled:
+				count = streamInferredEvents(consumedPre, count, verbose, inferOpts, &inferState, &loader)
+			case symbolicEnabled:
 				var infos []eventInfo
 				infos, count = collectEvents(consumedPre, count)
 				collected = append(collected, infos...)
-			} else if progressEnabled && isFileInput(r.PreTrace) {
+			case progressEnabled && isFileInput(r.PreTrace):
 				progress := newProgress("Pre-Trace:", preTraceTotal)
-				count = runProgress(consumedPre, progress, count, start, quiet, verbose, specPath, len(m.Configs()))
-			} else {
-				for c := range consumedPre {
-					printEventLine(quiet, verbose, specPath, start, count, len(m.Configs()), c.Term)
-					c.Done()
+				count = runProgress(consumedPre, progress, count, quiet, verbose)
+			default:
+				for event := range consumedPre {
+					printEventLine(quiet, verbose, count, event)
 					count++
 				}
+			}
+			if err := handleProcessFailure(preErrs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+				return err
 			}
 		}
 
@@ -249,46 +265,40 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("cannot create rewrite monitor: %w", err)
 		}
-		rewriter.SetShowAllEvents(r.ShowAll)
-		rewriter.SetTraceConfig(r.TraceConfig)
-		rewriter.SetShowAllConfigs(r.ShowAllCfgs)
-		if progressEnabled {
-			rewriter.SetErrorHandler(func(line int, _ term.Term, _ string) {
-				progressErrLine.CompareAndSwap(0, int64(line))
-			})
-		}
-
 		rewriterEvents := monitor.ParseEvents(eventSource, pid)
-		outs, _ := rewriter.ProcessEvents(rewriterEvents, true, pid)
-		_, consumedEvents := m.ProcessEvents(outs, false, pid)
+		outs, _, rewriteErrs := rewriter.ProcessEvents(rewriterEvents, true, pid)
+		_, consumedEvents, liveErrs := m.ProcessEvents(outs, false, pid)
 
 		// Same output handling as pre-trace.
-		if inferEnabled || symbolicEnabled {
+		switch {
+		case inferEnabled:
+			count = streamInferredEvents(consumedEvents, count, verbose, inferOpts, &inferState, &loader)
+		case symbolicEnabled:
 			var infos []eventInfo
 			infos, count = collectEvents(consumedEvents, count)
 			collected = append(collected, infos...)
-		} else if progressEnabled && isFileInput(r.In) {
+		case progressEnabled && isFileInput(r.In):
 			progress := newProgress("Live Trace:", liveTotal)
-			count = runProgress(consumedEvents, progress, count, start, quiet, verbose, specPath, len(m.Configs()))
-			if printProgressError() {
-				return nil
-			}
-		} else {
-			for c := range consumedEvents {
-				printEventLine(quiet, verbose, specPath, start, count, len(m.Configs()), c.Term)
-				c.Done()
+			count = runProgress(consumedEvents, progress, count, quiet, verbose)
+		default:
+			for event := range consumedEvents {
+				printEventLine(quiet, verbose, count, event)
 				count++
 			}
 		}
-
-		// Emit inference/symbolic reports at the end of processing.
-		if symbolicEnabled && !quiet {
-			writeSymbolicOutput(collected, symbolicOpts, r.TermReport, loader)
-		} else if inferEnabled && !quiet {
-			writeInferredOutput(collected, inferOpts, verbose, r.FormatReport, r.FormatReportStdout, loader)
-		} else {
-			stopLoadingIndicator(loader)
+		if err := handleProcessFailure(rewriteErrs, rewriter, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+			return err
 		}
+		if err := handleProcessFailure(liveErrs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+			if progressEnabled {
+				if progressErr := printProgressError(); progressErr != nil {
+					return progressErr
+				}
+			}
+			return err
+		}
+
+		emitAnalysisOutput(symbolicEnabled, inferEnabled, quiet, collected, symbolicOpts, r.TermReport, &inferState, r.FormatReport, r.FormatReportStdout, loader)
 		if !quiet && !progressEnabled {
 			fmt.Println()
 			printHeader(compactHeader(specPath, count-1, len(m.Configs()), start, analysisMode))
@@ -299,6 +309,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	// Non-rewrite mode: standard input handling.
 	count := 1
 	var collected []eventInfo
+	var inferState inferStreamState
 	start := time.Now()
 	var loader *loadingIndicator
 	if analysisMode {
@@ -311,7 +322,8 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if inferEnabled || symbolicEnabled {
+	switch {
+	case inferEnabled || symbolicEnabled:
 		// Inference/symbolic needs full event collection first.
 		if r.PreTrace != "" && isFileInput(r.PreTrace) {
 			preTrace, err := os.Open(r.PreTrace)
@@ -320,26 +332,32 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 			}
 			defer preTrace.Close()
 			events := monitor.ParseEvents(preTrace, pid)
-			_, consumedPre := m.ProcessEvents(events, false, pid)
-			var infos []eventInfo
-			infos, count = collectEvents(consumedPre, count)
-			collected = append(collected, infos...)
+			_, consumedPre, preErrs := m.ProcessEvents(events, false, pid)
+			if inferEnabled {
+				count = streamInferredEvents(consumedPre, count, verbose, inferOpts, &inferState, &loader)
+			} else {
+				var infos []eventInfo
+				infos, count = collectEvents(consumedPre, count)
+				collected = append(collected, infos...)
+			}
+			if err := handleProcessFailure(preErrs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+				return err
+			}
 		}
 
-		if isFileInput(r.In) {
-			events := monitor.ParseEvents(eventSource, pid)
-			_, consumed := m.ProcessEvents(events, false, pid)
-			var infos []eventInfo
-			infos, count = collectEvents(consumed, count)
-			collected = append(collected, infos...)
+		events := monitor.ParseEvents(eventSource, pid)
+		_, consumed, errs := m.ProcessEvents(events, false, pid)
+		if inferEnabled {
+			count = streamInferredEvents(consumed, count, verbose, inferOpts, &inferState, &loader)
 		} else {
-			events := monitor.ParseEvents(eventSource, pid)
-			_, consumed := m.ProcessEvents(events, false, pid)
 			var infos []eventInfo
 			infos, count = collectEvents(consumed, count)
 			collected = append(collected, infos...)
 		}
-	} else if progressEnabled {
+		if err := handleProcessFailure(errs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+			return err
+		}
+	case progressEnabled:
 		// Progress mode: count lines and render bar while consuming events.
 		preTraceTotal := 0
 		liveTotal := 0
@@ -359,35 +377,43 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 			}
 			defer preTrace.Close()
 			events := monitor.ParseEvents(preTrace, pid)
-			_, consumedPre := m.ProcessEvents(events, false, pid)
+			_, consumedPre, preErrs := m.ProcessEvents(events, false, pid)
 			progress := newProgress("Pre-Trace:", preTraceTotal)
-			count = runProgress(consumedPre, progress, count, start, quiet, verbose, specPath, len(m.Configs()))
-			if printProgressError() {
-				return nil
+			count = runProgress(consumedPre, progress, count, quiet, verbose)
+			if err := handleProcessFailure(preErrs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+				if progressErr := printProgressError(); progressErr != nil {
+					return progressErr
+				}
+				return err
 			}
 		}
 
 		if isFileInput(r.In) {
 			events := monitor.ParseEvents(eventSource, pid)
-			_, consumed := m.ProcessEvents(events, false, pid)
+			_, consumed, errs := m.ProcessEvents(events, false, pid)
 			progress := newProgress("Live Trace:", liveTotal)
-			count = runProgress(consumed, progress, count, start, quiet, verbose, specPath, len(m.Configs()))
-			if printProgressError() {
-				return nil
+			count = runProgress(consumed, progress, count, quiet, verbose)
+			if err := handleProcessFailure(errs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+				if progressErr := printProgressError(); progressErr != nil {
+					return progressErr
+				}
+				return err
 			}
 		} else {
 			events := monitor.ParseEvents(eventSource, pid)
-			_, consumed := m.ProcessEvents(events, false, pid)
-			for c := range consumed {
-				printEventLine(quiet, verbose, specPath, start, count, len(m.Configs()), c.Term)
-				c.Done()
+			_, consumed, errs := m.ProcessEvents(events, false, pid)
+			for event := range consumed {
+				printEventLine(quiet, verbose, count, event)
 				count++
 			}
-			if printProgressError() {
-				return nil
+			if err := handleProcessFailure(errs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+				if progressErr := printProgressError(); progressErr != nil {
+					return progressErr
+				}
+				return err
 			}
 		}
-	} else {
+	default:
 		// Default mode: stream events and print each line.
 		// No rewrite: use original logic with MultiReader for pre-trace
 		source := io.Reader(eventSource)
@@ -401,32 +427,26 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		}
 
 		events := monitor.ParseEvents(source, pid)
-		_, consumed := m.ProcessEvents(events, false, pid)
+		_, consumed, errs := m.ProcessEvents(events, false, pid)
 
-		for c := range consumed {
-			printEventLine(quiet, verbose, specPath, start, count, len(m.Configs()), c.Term)
-			c.Done()
+		for event := range consumed {
+			printEventLine(quiet, verbose, count, event)
 			count++
+		}
+		if err := handleProcessFailure(errs, m, quiet, progressEnabled, &progressErrLine, viewOpts); err != nil {
+			return err
 		}
 	}
 
-	// Emit inference/symbolic reports at the end of processing.
-	if symbolicEnabled && !quiet {
-		writeSymbolicOutput(collected, symbolicOpts, r.TermReport, loader)
-	} else if inferEnabled && !quiet {
-		writeInferredOutput(collected, inferOpts, verbose, r.FormatReport, r.FormatReportStdout, loader)
-	} else {
-		stopLoadingIndicator(loader)
-	}
+	emitAnalysisOutput(symbolicEnabled, inferEnabled, quiet, collected, symbolicOpts, r.TermReport, &inferState, r.FormatReport, r.FormatReportStdout, loader)
 	if !quiet && !progressEnabled {
 		fmt.Println()
 		printHeader(compactHeader(specPath, count-1, len(m.Configs()), start, analysisMode))
 	}
-
 	return nil
 }
 
-func printEventLine(quiet, verbose bool, specPath string, start time.Time, count, configs int, event term.Term) {
+func printEventLine(quiet, verbose bool, count int, event term.Term) {
 	// Single event output line: compact by default, verbose when requested.
 	if quiet {
 		return
@@ -438,6 +458,161 @@ func printEventLine(quiet, verbose bool, specPath string, start time.Time, count
 	}
 
 	fmt.Printf("%s %4d  %s\n", successMarker(), count, formatCompactEvent(event))
+}
+
+type monitorViewOptions struct {
+	showAllEvents  bool
+	showAllCfgs    bool
+	traceConfig    int
+	maxSuggestions int
+}
+
+func waitProcessError(errs <-chan *monitor.ProcessError) *monitor.ProcessError {
+	if errs == nil {
+		return nil
+	}
+	for err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func handleProcessFailure(errs <-chan *monitor.ProcessError, m *monitor.Monitor, quiet, progress bool, progressErrLine *atomic.Int64, opts monitorViewOptions) error {
+	procErr := waitProcessError(errs)
+	if procErr == nil {
+		return nil
+	}
+	if progress {
+		progressErrLine.CompareAndSwap(0, int64(procErr.Line))
+		return procErr.Err
+	}
+	if quiet {
+		return procErr.Err
+	}
+	fmt.Println(formatErrorLineMarker(procErr.Line, procErr.Event))
+	fmt.Println()
+	details := m.BuildNoApplicableRuleDetails(procErr.Event, procErr.Line, opts.showAllCfgs, opts.traceConfig)
+	fmt.Print(formatNoApplicableRule(details, opts.showAllEvents, opts.maxSuggestions))
+	return procErr.Err
+}
+
+func formatErrorLineMarker(line int, event term.Term) string {
+	marker := "✗"
+	if !color.NoColor {
+		marker = color.New(color.FgRed).Sprint("✗")
+	}
+	return fmt.Sprintf("%s %4d  %s", marker, line, event)
+}
+
+func formatNoApplicableRule(details monitor.NoApplicableRuleDetails, showAll bool, maxSuggestions int) string {
+	var b strings.Builder
+	headline := "✗ ERROR: Event Processing Failed"
+	if !color.NoColor {
+		headline = color.New(color.FgRed, color.Bold).Sprint(headline)
+	}
+	fmt.Fprintln(&b, headline)
+	fmt.Fprintf(&b, "  Event: %s\n", details.Event)
+	if details.Line > 0 {
+		fmt.Fprintf(&b, "  Line: %d\n", details.Line)
+	}
+	fmt.Fprintf(&b, "  Reason: %s\n", details.Reason)
+	fmt.Fprintln(&b)
+
+	if details.ConfigCount > 1 {
+		fmt.Fprintf(&b, "WARNING: Multiple Configurations Detected (%d)\n", details.ConfigCount)
+		fmt.Fprintln(&b, "  The specification has branched into multiple possible states.")
+		fmt.Fprintln(&b, "  Allowed events differ by configuration.")
+	}
+	if details.MissingTraceConfig > 0 {
+		fmt.Fprintf(&b, "\nWARNING: Config #%d not found; showing all configs\n", details.MissingTraceConfig)
+	}
+
+	for _, cfg := range details.Configs {
+		if details.ConfigCount > 1 {
+			fmt.Fprintf(&b, "\nConfig #%d:\n", cfg.Index)
+		}
+		formatPossibleEvents(&b, cfg.Events, showAll, maxSuggestions)
+	}
+
+	if details.ShowTraceConfigHint {
+		fmt.Fprintln(&b, "Use --trace-config=N to follow specific configuration")
+	}
+	if details.ShowAllConfigsHint {
+		fmt.Fprintln(&b, "Use --show-all-configs to see all possible events per configuration")
+	}
+
+	return b.String()
+}
+
+func formatPossibleEvents(b *strings.Builder, events []monitor.ExpectedEvent, showAll bool, maxPerGroup int) {
+	if showAll || maxPerGroup <= 0 {
+		maxPerGroup = len(events)
+	}
+
+	groups := groupExpectedEvents(events)
+	if len(groups) == 0 {
+		fmt.Fprintln(b, "No expected events available.")
+		return
+	}
+
+	total := len(events)
+	if !showAll && total > maxPerGroup {
+		fmt.Fprintf(b, "Expected Events (showing %d of %d, grouped by event name):\n\n", maxPerGroup, total)
+	} else {
+		fmt.Fprintf(b, "Expected Events (showing %d of %d, grouped by event name):\n\n", total, total)
+	}
+
+	truncated := false
+	for _, g := range groups {
+		fmt.Fprintf(b, "%s/%d:\n", g.Name, g.Arity)
+		limit := len(g.Items)
+		if !showAll && limit > maxPerGroup {
+			limit = maxPerGroup
+		}
+		for i := 0; i < limit; i++ {
+			fmt.Fprintf(b, "  [%s] %s\n", g.Items[i].RuleName, g.Items[i].Term)
+		}
+		if limit < len(g.Items) {
+			fmt.Fprintf(b, "  ... (%d more)\n", len(g.Items)-limit)
+			truncated = true
+		}
+		fmt.Fprintln(b)
+	}
+	if truncated {
+		fmt.Fprintf(b, "Use --show-all-events to see all %d possibilities\n", total)
+		fmt.Fprintln(b, "Use --debug for full trace and rule details")
+	}
+}
+
+type expectedEventGroup struct {
+	Name  string
+	Arity int
+	Items []monitor.ExpectedEvent
+}
+
+func groupExpectedEvents(events []monitor.ExpectedEvent) []expectedEventGroup {
+	grouped := make(map[string]*expectedEventGroup)
+	for _, ev := range events {
+		key := fmt.Sprintf("%s/%d", ev.Name, ev.Arity)
+		if grouped[key] == nil {
+			grouped[key] = &expectedEventGroup{Name: ev.Name, Arity: ev.Arity}
+		}
+		grouped[key].Items = append(grouped[key].Items, ev)
+	}
+
+	var out []expectedEventGroup
+	for _, group := range grouped {
+		out = append(out, *group)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].Arity < out[j].Arity
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 func successMarker() string {
@@ -471,7 +646,7 @@ func compactHeader(specPath string, count, configs int, start time.Time, analysi
 }
 
 func formatCompactEvent(t term.Term) string {
-	// Compact rendering of a term, unwrapping pair-wrapped events.
+	// Compact rendering of a term while preserving call/return structure.
 	fn, err := term.AsFunction(t)
 	if err != nil || fn == nil {
 		return formatCompactTerm(t)
@@ -479,9 +654,7 @@ func formatCompactEvent(t term.Term) string {
 
 	if fn.Name == term.PairFunctionName && len(fn.Args) == 2 {
 		if call, err := term.AsFunction(fn.Args[0]); err == nil && call != nil {
-			args := append([]term.Term{}, call.Args...)
-			args = append(args, fn.Args[1])
-			return formatCompactCall(call.Name, args)
+			return fmt.Sprintf("%s → %s", formatCompactCall(call.Name, call.Args), formatCompactTerm(fn.Args[1]))
 		}
 	}
 
@@ -489,7 +662,7 @@ func formatCompactEvent(t term.Term) string {
 }
 
 func formatVerboseEvent(t term.Term) string {
-	// Full rendering of a term (no truncation), unwrapping pair-wrapped events.
+	// Full rendering of a term while preserving call/return structure.
 	fn, err := term.AsFunction(t)
 	if err != nil || fn == nil {
 		return formatVerboseTerm(t)
@@ -497,9 +670,7 @@ func formatVerboseEvent(t term.Term) string {
 
 	if fn.Name == term.PairFunctionName && len(fn.Args) == 2 {
 		if call, err := term.AsFunction(fn.Args[0]); err == nil && call != nil {
-			args := append([]term.Term{}, call.Args...)
-			args = append(args, fn.Args[1])
-			return formatVerboseCall(call.Name, args)
+			return fmt.Sprintf("%s → %s", formatVerboseCall(call.Name, call.Args), formatVerboseTerm(fn.Args[1]))
 		}
 	}
 
@@ -629,12 +800,11 @@ func newProgress(label string, total int) progressState {
 	return progressState{label: label, total: total, start: time.Now()}
 }
 
-func runProgress(consumed <-chan *monitor.ConsumedEvent, progress progressState, count int, start time.Time, quiet, verbose bool, specPath string, configs int) int {
+func runProgress(consumed <-chan term.Term, progress progressState, count int, quiet, verbose bool) int {
 	// Consume events while rendering a progress bar for batch inputs.
 	if progress.total <= 0 {
-		for c := range consumed {
-			printEventLine(quiet, verbose, specPath, start, count, configs, c.Term)
-			c.Done()
+		for event := range consumed {
+			printEventLine(quiet, verbose, count, event)
 			count++
 		}
 		return count
@@ -646,7 +816,7 @@ func runProgress(consumed <-chan *monitor.ConsumedEvent, progress progressState,
 	}
 	current := 0
 	maxLineLen := 0
-	for c := range consumed {
+	for range consumed {
 		current++
 		count++
 		line := renderProgress(progress, current)
@@ -654,7 +824,6 @@ func runProgress(consumed <-chan *monitor.ConsumedEvent, progress progressState,
 			maxLineLen = len(line)
 		}
 		fmt.Printf("\r%-*s", maxLineLen, line)
-		c.Done()
 	}
 	finalLine := renderProgress(progress, current)
 	if len(finalLine) > maxLineLen {
@@ -665,7 +834,7 @@ func runProgress(consumed <-chan *monitor.ConsumedEvent, progress progressState,
 }
 
 func renderProgress(progress progressState, current int) string {
-	// Render a compact progress line with bar: "[bar] current/total percent in elapsed".
+	// Render a compact progress line with bar, elapsed time, and ETA.
 	elapsed := time.Since(progress.start)
 	if elapsed < 0 {
 		elapsed = 0
@@ -687,69 +856,144 @@ func renderProgress(progress progressState, current int) string {
 	}
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 
-	return fmt.Sprintf("[%s] %d/%d %d%% in %s", bar, current, progress.total, percent, elapsed.Round(100*time.Millisecond))
+	eta := time.Duration(0)
+	if current > 0 && progress.total > current {
+		perItem := elapsed / time.Duration(current)
+		eta = perItem * time.Duration(progress.total-current)
+	}
+	elapsedText := fmt.Sprintf("%6s", elapsed.Round(100*time.Millisecond))
+	etaText := fmt.Sprintf("%6s", eta.Round(100*time.Millisecond))
+
+	return fmt.Sprintf(
+		"[%s] %d/%d %d%% in %s, ETA %s",
+		bar,
+		current,
+		progress.total,
+		percent,
+		elapsedText,
+		etaText,
+	)
 }
 
-func collectEvents(consumed <-chan *monitor.ConsumedEvent, start int) ([]eventInfo, int) {
+func collectEvents(consumed <-chan term.Term, start int) ([]eventInfo, int) {
 	// Convert an event stream into eventInfo slices for inference/symbolic modes.
 	var infos []eventInfo
 	count := start
-	for c := range consumed {
-		if info, ok := buildEventInfo(count, c.Term); ok {
+	for event := range consumed {
+		if info, ok := buildEventInfo(count, event); ok {
 			infos = append(infos, info)
 		}
-		c.Done()
 		count++
 	}
 	return infos, count
 }
 
-func writeInferredOutput(events []eventInfo, opts inferOptions, verbose bool, reportPath string, reportStdout bool, loader *loadingIndicator) {
-	// Print annotated events and emit the format inference report.
-	annotations, inferences := inferFormats(events, opts)
+type inferStreamState struct {
+	prevValues []valueRef
+	inferences []inference
+}
+
+const inferredCommentColumn = 56
+
+func formatInferenceNote(note string) string {
+	if color.NoColor {
+		return ">> " + note
+	}
+	return color.New(color.FgBlack, color.BgHiYellow, color.Bold).Sprint(" " + note + " ")
+}
+
+func streamInferredEvents(consumed <-chan term.Term, start int, verbose bool, opts inferOptions, state *inferStreamState, loader **loadingIndicator) int {
+	count := start
+	for event := range consumed {
+		if info, ok := buildEventInfo(count, event); ok {
+			notes, inferred, refs := inferEventFormats(info, state.prevValues, opts)
+			state.prevValues = append(state.prevValues, refs...)
+			state.inferences = append(state.inferences, inferred...)
+			writeInferredEventLines(info, notes, verbose, loader)
+		}
+		count++
+	}
+	return count
+}
+
+func writeInferredEventLines(ev eventInfo, notes []string, verbose bool, loader **loadingIndicator) {
+	line := formatCompactEvent(ev.raw)
+	if verbose {
+		line = formatVerboseEvent(ev.raw)
+	}
+	prefix := fmt.Sprintf("%s %4d  %s", successMarker(), ev.index, line)
+	lines := []string{prefix}
+	if len(notes) > 0 {
+		commentColumn := max(visibleTextWidth(prefix)+2, inferredCommentColumn)
+		pad := commentColumn - visibleTextWidth(prefix)
+		if pad < 1 {
+			pad = 1
+		}
+		lines[0] = prefix + strings.Repeat(" ", pad) + formatInferenceNote(notes[0])
+		padding := strings.Repeat(" ", commentColumn)
+		for _, note := range notes[1:] {
+			lines = append(lines, padding+formatInferenceNote(note))
+		}
+	}
+	writeStreamLines(lines, loader)
+}
+
+func writeStreamLines(lines []string, loader **loadingIndicator) {
+	if loader != nil && *loader != nil {
+		stopLoadingIndicator(*loader)
+		*loader = nil
+	}
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	for _, line := range lines {
+		_, _ = w.WriteString(line)
+		_ = w.WriteByte('\n')
+	}
+}
+
+func emitAnalysisOutput(
+	symbolicEnabled bool,
+	inferEnabled bool,
+	quiet bool,
+	collected []eventInfo,
+	symbolicOpts symbolicOptions,
+	termReport string,
+	inferState *inferStreamState,
+	formatReport string,
+	formatReportStdout bool,
+	loader *loadingIndicator,
+) {
+	switch {
+	case symbolicEnabled && !quiet:
+		writeSymbolicOutput(collected, symbolicOpts, termReport, loader)
+	case inferEnabled && !quiet:
+		finalizeInferredOutput(inferState, formatReport, formatReportStdout, loader)
+	default:
+		stopLoadingIndicator(loader)
+	}
+}
+
+func finalizeInferredOutput(state *inferStreamState, reportPath string, reportStdout bool, loader *loadingIndicator) {
+	stopLoadingIndicator(loader)
+	if state == nil {
+		return
+	}
 	report := ""
 	if reportPath != "" || reportStdout {
-		report = buildFormatReport(inferences)
+		report = buildFormatReport(state.inferences)
 	}
-	rendered := make([]string, len(events))
-	maxPrefixWidth := 0
-	for i, ev := range events {
-		line := formatCompactEvent(ev.raw)
-		if verbose {
-			line = formatVerboseEvent(ev.raw)
-		}
-		prefix := fmt.Sprintf("%s %4d  %s", successMarker(), ev.index, line)
-		rendered[i] = prefix
-		if w := visibleTextWidth(prefix); w > maxPrefixWidth {
-			maxPrefixWidth = w
-		}
-	}
-
-	commentColumn := maxPrefixWidth + 2
-	lines := make([]string, 0, len(events))
-	for i, ev := range events {
-		prefix := rendered[i]
-		line := prefix
-		if note, ok := annotations[ev.index]; ok {
-			pad := commentColumn - visibleTextWidth(prefix)
-			if pad < 1 {
-				pad = 1
-			}
-			line += strings.Repeat(" ", pad) + strings.TrimLeft(note, " ")
-		}
-		lines = append(lines, line)
-	}
-
 	if reportPath != "" {
-		if err := os.WriteFile(reportPath, []byte(report), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write format report: %v\n", err)
-		}
+		writeReportFile(reportPath, report, "format report")
 	}
-	writeLinesGradually(lines, loader)
-
 	if reportStdout {
 		fmt.Println()
 		fmt.Print(report)
+	}
+}
+
+func writeReportFile(path, report, label string) {
+	if err := os.WriteFile(path, []byte(report), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", label, err)
 	}
 }
 
@@ -764,9 +1008,7 @@ func writeSymbolicOutput(events []eventInfo, opts symbolicOptions, reportPath st
 	symEvents, vars, computed := buildSymbolic(events, opts)
 	report := buildSymbolicReport(symEvents, vars, computed, opts)
 	if reportPath != "" {
-		if err := os.WriteFile(reportPath, []byte(report), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write term report: %v\n", err)
-		}
+		writeReportFile(reportPath, report, "term report")
 	}
 	writeLinesGradually(renderSymbolicLines(symEvents, opts), loader)
 }
@@ -777,32 +1019,10 @@ func writeLinesGradually(lines []string, loader *loadingIndicator) {
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
 
-	delay := outputLineDelay(len(lines))
 	for _, line := range lines {
 		_, _ = w.WriteString(line)
 		_ = w.WriteByte('\n')
 		_ = w.Flush()
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-	}
-}
-
-func outputLineDelay(n int) time.Duration {
-	// Keep a slight pacing only on real terminals so replay is visually progressive.
-	info, err := os.Stdout.Stat()
-	if err != nil || (info.Mode()&os.ModeCharDevice) == 0 {
-		return 0
-	}
-	switch {
-	case n > 5000:
-		return 200 * time.Microsecond
-	case n > 1000:
-		return 350 * time.Microsecond
-	case n > 200:
-		return 600 * time.Microsecond
-	default:
-		return time.Millisecond
 	}
 }
 
@@ -902,7 +1122,7 @@ func colorEventName(name string) string {
 
 // NewMonitorCmd creates a new command for the monitor subcommand.
 func NewMonitorCmd() *cobra.Command {
-	var monitorConfig MonitorConfig
+	monitorConfig := defaultMonitorConfig()
 
 	cmd := &cobra.Command{
 		Use:   "monitor",

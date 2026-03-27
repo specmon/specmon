@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/fatih/color"
 	"github.com/specmon/specmon/term"
 )
 
@@ -25,10 +26,13 @@ type symVar struct {
 }
 
 type symEvent struct {
-	index    int
-	name     string
-	symbolic string
-	concrete []string
+	index     int
+	name      string
+	symbolic  string
+	concrete  []string
+	retSym    string
+	retValue  string
+	inputVars []string
 }
 
 type computedTerm struct {
@@ -43,12 +47,19 @@ type computedTerm struct {
 	inputVars    []string
 }
 
+type symbolExpandCache struct {
+	expr map[string]string
+	vars map[string]string
+}
+
 func buildSymbolic(events []eventInfo, opts symbolicOptions) ([]symEvent, []symVar, []computedTerm) {
 	// Build symbolic events, variable assignments, and computed terms.
 	vars := make(map[string]symVar)
+	varsByName := make(map[string]symVar)
 	var order []string
 	var eventsOut []symEvent
 	var computed []computedTerm
+	producers := make(map[string]string)
 
 	nextVar := 1
 	assignVar := func(key string, value string, evIdx, argIdx int) symVar {
@@ -61,6 +72,7 @@ func buildSymbolic(events []eventInfo, opts symbolicOptions) ([]symEvent, []symV
 		}
 		nextVar++
 		vars[key] = v
+		varsByName[v.name] = v
 		order = append(order, key)
 		return v
 	}
@@ -68,25 +80,21 @@ func buildSymbolic(events []eventInfo, opts symbolicOptions) ([]symEvent, []symV
 	for _, ev := range events {
 		// Normalize event names and arguments before symbolizing.
 		name := normalizeSymbolicName(ev.name, opts.detectCrypto)
-		cleanArgs := cleanSymbolicArgs(name, ev.args)
+		cleanArgs := cleanSymbolicArgs(ev.args)
 		symArgs, concrete, usedVars, argVars := symbolicArgs(ev.index, cleanArgs, vars, assignVar)
-		symbolic := fmt.Sprintf("%s(%s)", name, strings.Join(symArgs, ", "))
-		eventsOut = append(eventsOut, symEvent{
-			index:    ev.index,
-			name:     name,
-			symbolic: symbolic,
-			concrete: concrete,
-		})
 
 		outputVar := ""
 		outputArgPos := 0
+		retValue := ""
+		hasReturn := false
 		if out, ok := eventReturnBytes(ev.raw); ok {
+			hasReturn = true
+			retValue = "0x" + hex.EncodeToString(out)
 			key := string(out)
 			if v, ok := vars[key]; ok {
 				outputVar = v.name
 			} else {
-				val := "0x" + hex.EncodeToString(out)
-				v := assignVar(key, val, ev.index, 0)
+				v := assignVar(key, retValue, ev.index, 0)
 				outputVar = v.name
 			}
 			if len(argVars) > 0 && argVars[len(argVars)-1] == outputVar {
@@ -95,23 +103,45 @@ func buildSymbolic(events []eventInfo, opts symbolicOptions) ([]symEvent, []symV
 				outputArgPos = len(argVars) + 1
 			}
 		}
-		if outputVar == "" {
-			outputVar, outputArgPos = inferOutputVar(name, argVars, vars, ev.index)
+		if outputVar == "" && opts.detectCrypto {
+			outputVar, outputArgPos = inferOutputVar(name, argVars, varsByName, ev.index)
 		}
+		nestedArgs := append([]string(nil), symArgs...)
+		expandCache := newSymbolExpandCache()
+		for i, a := range nestedArgs {
+			nestedArgs[i] = expandExprWithProducersCached(strings.TrimSpace(a), producers, expandCache, map[string]bool{})
+		}
+		symbolic := fmt.Sprintf("%s(%s)", name, strings.Join(nestedArgs, ", "))
+		if hasReturn && outputVar != "" {
+			symbolic = fmt.Sprintf("%s → %s", symbolic, outputVar)
+		}
+		eventsOut = append(eventsOut, symEvent{
+			index:     ev.index,
+			name:      name,
+			symbolic:  symbolic,
+			concrete:  concrete,
+			retSym:    outputVar,
+			retValue:  retValue,
+			inputVars: uniqueStrings(usedVars),
+		})
 
-		if name != "" && name != "recv" && name != "receive" && name != "in" {
+		if name != "" {
 			// Treat non-receive events as computed terms.
-			computed = append(computed, computedTerm{
+			ct := computedTerm{
 				name:         fmt.Sprintf("t%d", ev.index),
 				eventIdx:     ev.index,
 				method:       strings.ToLower(name),
 				fnName:       name,
-				expr:         symbolic,
+				expr:         fmt.Sprintf("%s(%s)", name, strings.Join(symArgs, ", ")),
 				args:         append([]string(nil), symArgs...),
 				outputVar:    outputVar,
 				outputArgPos: outputArgPos,
 				inputVars:    uniqueStrings(usedVars),
-			})
+			}
+			computed = append(computed, ct)
+			if outputVar != "" {
+				producers[outputVar] = nestedCoreExpr(ct, producers, newSymbolExpandCache())
+			}
 		}
 	}
 
@@ -139,29 +169,15 @@ func eventReturnBytes(raw term.Term) ([]byte, bool) {
 }
 
 func normalizeSymbolicName(name string, detectCrypto bool) string {
-	// Optionally collapse crypto operations into a generic "compute" label.
-	if detectCrypto {
-		return name
-	}
-	switch strings.ToLower(name) {
-	case "hash", "h", "hmac", "mac", "enc", "encrypt", "dec", "decrypt":
-		return "compute"
-	default:
-		return name
-	}
+	// Keep user-defined event/function names unchanged.
+	return name
 }
 
-func cleanSymbolicArgs(name string, args []term.Term) []term.Term {
-	// Drop trailing empty pairs and simplify recv/in events to payload only.
+func cleanSymbolicArgs(args []term.Term) []term.Term {
+	// Drop only a trailing empty pair.
 	clean := args
 	if len(clean) > 0 && isEmptyPair(clean[len(clean)-1]) {
 		clean = clean[:len(clean)-1]
-	}
-	switch strings.ToLower(name) {
-	case "recv", "receive", "in":
-		if len(clean) >= 2 {
-			return clean[len(clean)-1:]
-		}
 	}
 	return clean
 }
@@ -211,37 +227,20 @@ func symbolicArgs(
 	return symArgs, concrete, used, argVars
 }
 
-func inferOutputVar(name string, argVars []string, vars map[string]symVar, eventIdx int) (string, int) {
-	// For explicit-output APIs (e.g. h(x, y)), treat the last new variable as output.
-	if len(argVars) < 2 || isStateEvent(name) {
+func inferOutputVar(name string, argVars []string, varsByName map[string]symVar, eventIdx int) (string, int) {
+	// For explicit-output APIs, treat the last new variable as output.
+	_ = name
+	if len(argVars) < 2 {
 		return "", 0
 	}
 	last := argVars[len(argVars)-1]
 	if last == "" {
 		return "", 0
 	}
-	if v, ok := findVarByName(vars, last); ok && v.eventIdx == eventIdx {
+	if v, ok := varsByName[last]; ok && v.eventIdx == eventIdx {
 		return last, len(argVars)
 	}
 	return "", 0
-}
-
-func findVarByName(vars map[string]symVar, name string) (symVar, bool) {
-	for _, v := range vars {
-		if v.name == name {
-			return v, true
-		}
-	}
-	return symVar{}, false
-}
-
-func isStateEvent(name string) bool {
-	switch strings.ToLower(name) {
-	case "setup", "init", "send", "recv", "receive", "in", "out", "trace":
-		return true
-	default:
-		return false
-	}
 }
 
 func bytesOf(t term.Term) ([]byte, bool) {
@@ -266,6 +265,11 @@ func renderSymbolicLines(events []symEvent, opts symbolicOptions) []string {
 				line = colorEventName(ev.name) + line[len(ev.name):]
 			}
 			lines = append(lines, fmt.Sprintf("%s %4d  %s", successMarker(), ev.index, line))
+			if opts.showProvenance {
+				if prov := renderStdoutProvenance(ev); prov != "" {
+					lines = append(lines, strings.Repeat(" ", 8)+prov)
+				}
+			}
 		}
 		return lines
 	}
@@ -295,15 +299,55 @@ func renderSymbolicLines(events []symEvent, opts symbolicOptions) []string {
 				pad = 1
 			}
 			line = fmt.Sprintf("%s%s[%s]", prefix, strings.Repeat(" ", pad), strings.Join(ev.concrete, ", "))
+			if ev.retValue != "" {
+				line += fmt.Sprintf(" → [%s]", ev.retValue)
+			}
+		} else if ev.retValue != "" {
+			pad := concreteColumn - visibleTextWidth(prefix)
+			if pad < 1 {
+				pad = 1
+			}
+			line = fmt.Sprintf("%s%s[%s]", prefix, strings.Repeat(" ", pad), ev.retValue)
 		}
 		lines = append(lines, line)
+		if opts.showProvenance {
+			if prov := renderStdoutProvenance(ev); prov != "" {
+				lines = append(lines, strings.Repeat(" ", 8)+prov)
+			}
+		}
 	}
 	return lines
+}
+
+func renderStdoutProvenance(ev symEvent) string {
+	var parts []string
+	if len(ev.inputVars) > 0 {
+		parts = append(parts, fmt.Sprintf("uses %s", strings.Join(ev.inputVars, ", ")))
+	}
+	if ev.retSym != "" {
+		parts = append(parts, fmt.Sprintf("produces %s", ev.retSym))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	label := "provenance: " + strings.Join(parts, " -> ")
+	if color.NoColor {
+		return label
+	}
+	return color.New(color.FgHiBlack).Sprint(label)
 }
 
 func buildSymbolicReport(events []symEvent, vars []symVar, computed []computedTerm, opts symbolicOptions) string {
 	// Build the term report: variables, computed terms, and provenance.
 	var b strings.Builder
+	eventTokens := make(map[int]map[string]struct{}, len(events))
+	for _, ev := range events {
+		eventTokens[ev.index] = extractExprTokenSet(ev.symbolic)
+	}
+	computedTokens := make(map[int]map[string]struct{}, len(computed))
+	for _, ct := range computed {
+		computedTokens[ct.eventIdx] = extractExprTokenSet(ct.expr)
+	}
 	b.WriteString("Symbolic Reconstruction Report\n")
 	b.WriteString("===============================\n\n")
 
@@ -337,14 +381,15 @@ func buildSymbolicReport(events []symEvent, vars []symVar, computed []computedTe
 	if hasTracked {
 		b.WriteString("Computed Term Reuse:\n")
 		producers := map[string]string{}
+		expandCache := newSymbolExpandCache()
 		for _, ct := range computed {
 			if ct.outputVar == "" {
 				continue
 			}
 			tracked := []string{ct.outputVar}
-			usedIn := findValueReuseEvents(events, ct.eventIdx, tracked)
-			computedUses := findComputedReuse(computed, ct.eventIdx, tracked)
-			nested := buildNestedVersion(ct, producers)
+			usedIn := findValueReuseEvents(events, eventTokens, ct.eventIdx, tracked)
+			computedUses := findComputedReuse(computed, computedTokens, ct.eventIdx, tracked)
+			nested := buildNestedVersion(ct, producers, expandCache)
 
 			fmt.Fprintf(&b, "  %s: %s\n", ct.name, ct.expr)
 			fmt.Fprintf(&b, "    nested version: %s\n", nested)
@@ -364,7 +409,7 @@ func buildSymbolicReport(events []symEvent, vars []symVar, computed []computedTe
 				fmt.Fprintf(&b, "    used in events: (none)\n")
 			}
 			b.WriteString("\n")
-			producers[ct.outputVar] = nestedCoreExpr(ct, producers)
+			producers[ct.outputVar] = nestedCoreExpr(ct, producers, expandCache)
 		}
 		b.WriteString("\n")
 	}
@@ -375,7 +420,7 @@ func buildSymbolicReport(events []symEvent, vars []symVar, computed []computedTe
 		usage := make(map[string][]int)
 		for _, ev := range events {
 			for _, v := range vars {
-				if exprContainsVar(ev.symbolic, v.name) {
+				if tokenSetContains(eventTokens[ev.index], v.name) {
 					usage[v.name] = append(usage[v.name], ev.index)
 				}
 			}
@@ -407,29 +452,41 @@ func buildSymbolicReport(events []symEvent, vars []symVar, computed []computedTe
 	return b.String()
 }
 
-func buildNestedVersion(ct computedTerm, producers map[string]string) string {
-	core := nestedCoreExpr(ct, producers)
+func buildNestedVersion(ct computedTerm, producers map[string]string, cache *symbolExpandCache) string {
+	core := nestedCoreExpr(ct, producers, cache)
 	if ct.outputVar == "" {
 		return core
 	}
 	return fmt.Sprintf("%s = %s", core, ct.outputVar)
 }
 
-func nestedCoreExpr(ct computedTerm, producers map[string]string) string {
+func nestedCoreExpr(ct computedTerm, producers map[string]string, cache *symbolExpandCache) string {
 	args := append([]string(nil), ct.args...)
 	if ct.outputArgPos > 0 && ct.outputArgPos <= len(args) {
 		idx := ct.outputArgPos - 1
 		args = append(args[:idx], args[idx+1:]...)
 	}
 	for i, a := range args {
-		args[i] = expandExprWithProducers(strings.TrimSpace(a), producers, map[string]bool{})
+		args[i] = expandExprWithProducersCached(strings.TrimSpace(a), producers, cache, map[string]bool{})
 	}
 	return fmt.Sprintf("%s(%s)", ct.fnName, strings.Join(args, ", "))
 }
 
-func expandExprWithProducers(expr string, producers map[string]string, stack map[string]bool) string {
+func newSymbolExpandCache() *symbolExpandCache {
+	return &symbolExpandCache{
+		expr: make(map[string]string),
+		vars: make(map[string]string),
+	}
+}
+
+func expandExprWithProducersCached(expr string, producers map[string]string, cache *symbolExpandCache, stack map[string]bool) string {
 	if expr == "" {
 		return expr
+	}
+	if cache != nil {
+		if expanded, ok := cache.expr[expr]; ok {
+			return expanded
+		}
 	}
 	var b strings.Builder
 	runes := []rune(expr)
@@ -441,19 +498,28 @@ func expandExprWithProducers(expr string, producers map[string]string, stack map
 				j++
 			}
 			tok := string(runes[i:j])
-			b.WriteString(expandVarToken(tok, producers, stack))
+			b.WriteString(expandVarToken(tok, producers, cache, stack))
 			i = j
 			continue
 		}
 		b.WriteRune(r)
 		i++
 	}
-	return b.String()
+	expanded := b.String()
+	if cache != nil {
+		cache.expr[expr] = expanded
+	}
+	return expanded
 }
 
-func expandVarToken(tok string, producers map[string]string, stack map[string]bool) string {
+func expandVarToken(tok string, producers map[string]string, cache *symbolExpandCache, stack map[string]bool) string {
 	if !isVarToken(tok) {
 		return tok
+	}
+	if cache != nil {
+		if expanded, ok := cache.vars[tok]; ok {
+			return expanded
+		}
 	}
 	prod, ok := producers[tok]
 	if !ok {
@@ -463,8 +529,11 @@ func expandVarToken(tok string, producers map[string]string, stack map[string]bo
 		return tok
 	}
 	stack[tok] = true
-	expanded := expandExprWithProducers(prod, producers, stack)
+	expanded := expandExprWithProducersCached(prod, producers, cache, stack)
 	delete(stack, tok)
+	if cache != nil {
+		cache.vars[tok] = expanded
+	}
 	return expanded
 }
 
@@ -484,7 +553,7 @@ func isVarToken(tok string) bool {
 	return true
 }
 
-func findValueReuseEvents(events []symEvent, fromEvent int, varNames []string) []int {
+func findValueReuseEvents(events []symEvent, eventTokens map[int]map[string]struct{}, fromEvent int, varNames []string) []int {
 	if len(varNames) == 0 {
 		return nil
 	}
@@ -494,7 +563,7 @@ func findValueReuseEvents(events []symEvent, fromEvent int, varNames []string) [
 			continue
 		}
 		for _, vn := range varNames {
-			if exprContainsVar(ev.symbolic, vn) {
+			if tokenSetContains(eventTokens[ev.index], vn) {
 				usedIn = append(usedIn, ev.index)
 				break
 			}
@@ -503,7 +572,7 @@ func findValueReuseEvents(events []symEvent, fromEvent int, varNames []string) [
 	return uniqueInts(usedIn)
 }
 
-func findComputedReuse(computed []computedTerm, fromEvent int, varNames []string) []string {
+func findComputedReuse(computed []computedTerm, computedTokens map[int]map[string]struct{}, fromEvent int, varNames []string) []string {
 	if len(varNames) == 0 {
 		return nil
 	}
@@ -512,7 +581,7 @@ func findComputedReuse(computed []computedTerm, fromEvent int, varNames []string
 		if ct.eventIdx <= fromEvent {
 			continue
 		}
-		if containsAnyVar(ct.expr, varNames) {
+		if tokenSetContainsAny(computedTokens[ct.eventIdx], varNames) {
 			out = append(out, fmt.Sprintf("%s(event %d)", ct.name, ct.eventIdx))
 		}
 	}
@@ -555,36 +624,6 @@ func uniqueInts(in []int) []int {
 	return out
 }
 
-func containsAllVars(symbolic string, vars []string) bool {
-	for _, v := range vars {
-		if !exprContainsVar(symbolic, v) {
-			return false
-		}
-	}
-	return true
-}
-
-func containsAnyVar(symbolic string, vars []string) bool {
-	for _, v := range vars {
-		if exprContainsVar(symbolic, v) {
-			return true
-		}
-	}
-	return false
-}
-
-func exprContainsVar(symbolic, varName string) bool {
-	if symbolic == "" || varName == "" {
-		return false
-	}
-	for _, tok := range extractExprTokens(symbolic) {
-		if tok == varName {
-			return true
-		}
-	}
-	return false
-}
-
 func parseVarIndex(name string) (int, bool) {
 	if len(name) < 2 || name[0] != 'x' {
 		return 0, false
@@ -615,4 +654,36 @@ func extractExprTokens(expr string) []string {
 	}
 	flush()
 	return out
+}
+
+func extractExprTokenSet(expr string) map[string]struct{} {
+	tokens := extractExprTokens(expr)
+	if len(tokens) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(tokens))
+	for _, tok := range tokens {
+		set[tok] = struct{}{}
+	}
+	return set
+}
+
+func tokenSetContains(tokens map[string]struct{}, varName string) bool {
+	if len(tokens) == 0 || varName == "" {
+		return false
+	}
+	_, ok := tokens[varName]
+	return ok
+}
+
+func tokenSetContainsAny(tokens map[string]struct{}, vars []string) bool {
+	if len(tokens) == 0 || len(vars) == 0 {
+		return false
+	}
+	for _, v := range vars {
+		if tokenSetContains(tokens, v) {
+			return true
+		}
+	}
+	return false
 }

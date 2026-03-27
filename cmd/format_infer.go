@@ -33,6 +33,7 @@ type valueRef struct {
 type inference struct {
 	eventIndex int
 	eventName  string
+	argIndex   int
 	expr       string
 	lengthExpr string
 	confidence string
@@ -52,43 +53,39 @@ func buildEventInfo(index int, t term.Term) (eventInfo, bool) {
 	}, true
 }
 
-func inferFormats(events []eventInfo, opts inferOptions) (map[int]string, []inference) {
-	// Walk events and infer simple format relationships between byte arguments.
-	annotations := make(map[int]string)
-	var inferences []inference
+func inferEventFormats(ev eventInfo, prevValues []valueRef, opts inferOptions) ([]string, []inference, []valueRef) {
+	byteArgs := extractByteArgs(ev.args)
+	if len(byteArgs) == 0 {
+		return nil, nil, nil
+	}
 
-	var prevValues []valueRef
-	for _, ev := range events {
-		byteArgs := extractByteArgs(ev.args)
-		if len(byteArgs) == 0 {
-			continue
-		}
-		// Annotate only the first byte argument to keep output readable.
-		arg := byteArgs[0]
+	var notes []string
+	var inferred []inference
+	for _, arg := range byteArgs {
 		expr, confidence, ok := inferExpression(arg.bytes, prevValues, opts)
 		if ok && allowConfidence(confidence, opts.confidenceLevel) {
 			lengthExpr := inferLengthShape(expr, prevValues)
-			annotation := fmt.Sprintf("  # inferred: %s(%s)", ev.name, expr)
-			annotations[ev.index] = annotation
-			inferences = append(inferences, inference{
+			notes = append(notes, fmt.Sprintf("# inferred a%d: %s", arg.index, expr))
+			inferred = append(inferred, inference{
 				eventIndex: ev.index,
 				eventName:  ev.name,
+				argIndex:   arg.index,
 				expr:       expr,
 				lengthExpr: lengthExpr,
 				confidence: confidence,
 			})
 		}
-
-		for _, arg := range byteArgs {
-			prevValues = append(prevValues, valueRef{
-				eventIndex: ev.index,
-				argIndex:   arg.index,
-				bytes:      arg.bytes,
-			})
-		}
 	}
 
-	return annotations, inferences
+	nextRefs := make([]valueRef, 0, len(byteArgs))
+	for _, arg := range byteArgs {
+		nextRefs = append(nextRefs, valueRef{
+			eventIndex: ev.index,
+			argIndex:   arg.index,
+			bytes:      arg.bytes,
+		})
+	}
+	return notes, inferred, nextRefs
 }
 
 func allowConfidence(confidence, level string) bool {
@@ -167,6 +164,7 @@ func findConcat(value []byte, prev []valueRef, minLen, maxComp int) ([]valueRef,
 	}
 	queue := []node{{pos: 0}}
 	seen := make(map[int]int)
+	const maxQueueSize = 2048
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
@@ -189,6 +187,9 @@ func findConcat(value []byte, prev []valueRef, minLen, maxComp int) ([]valueRef,
 				for _, ref := range refs {
 					path := append(append([]valueRef{}, n.path...), ref)
 					queue = append(queue, node{pos: n.pos + l, path: path})
+					if len(queue) > maxQueueSize {
+						queue = queue[:maxQueueSize]
+					}
 				}
 			}
 		}
@@ -197,43 +198,60 @@ func findConcat(value []byte, prev []valueRef, minLen, maxComp int) ([]valueRef,
 }
 
 func findTagPayload(value []byte, prev []valueRef, minLen int) (string, bool) {
-	// Detect a one-byte tag followed by a known payload.
+	// Detect a short tag prefix followed by a known payload.
 	if len(value) < 2 {
 		return "", false
 	}
-	tag := value[:1]
-	rest := value[1:]
-	for _, ref := range prev {
-		if len(ref.bytes) < minLen {
-			continue
-		}
-		if bytes.Equal(ref.bytes, rest) {
-			return fmt.Sprintf("cat(byte(%s), %s)", formatBytesShort(tag), formatRef(ref)), true
+	maxTagLen := min(4, len(value)-1)
+	for tagLen := 1; tagLen <= maxTagLen; tagLen++ {
+		tag := value[:tagLen]
+		rest := value[tagLen:]
+		for _, ref := range prev {
+			if len(ref.bytes) < minLen {
+				continue
+			}
+			if bytes.Equal(ref.bytes, rest) {
+				return fmt.Sprintf("cat(tag:%s, %s)", formatBytesShort(tag), formatRef(ref)), true
+			}
 		}
 	}
 	return "", false
 }
 
 func findLengthPrefix(value []byte, prev []valueRef, minLen int) (string, bool) {
-	// Detect a 2-byte length prefix followed by a known payload.
-	if len(value) < 3 {
-		return "", false
+	// Detect common fixed-size length prefixes followed by a known payload.
+	type lengthEncoding struct {
+		size   int
+		label  string
+		decode func([]byte) int
 	}
-	prefix := value[:2]
-	rest := value[2:]
-	length := int(binary.BigEndian.Uint16(prefix))
-	if length != len(rest) {
-		return "", false
+	encodings := []lengthEncoding{
+		{size: 1, label: "len:1", decode: func(b []byte) int { return int(b[0]) }},
+		{size: 2, label: "lenbe:2", decode: func(b []byte) int { return int(binary.BigEndian.Uint16(b)) }},
+		{size: 2, label: "lenle:2", decode: func(b []byte) int { return int(binary.LittleEndian.Uint16(b)) }},
+		{size: 4, label: "lenbe:4", decode: func(b []byte) int { return int(binary.BigEndian.Uint32(b)) }},
+		{size: 4, label: "lenle:4", decode: func(b []byte) int { return int(binary.LittleEndian.Uint32(b)) }},
 	}
-	for _, ref := range prev {
-		if len(ref.bytes) < minLen {
+	for _, enc := range encodings {
+		if len(value) <= enc.size {
 			continue
 		}
-		if bytes.Equal(ref.bytes, rest) {
-			return fmt.Sprintf("cat(len:2, %s)", formatRef(ref)), true
+		prefix := value[:enc.size]
+		rest := value[enc.size:]
+		if enc.decode(prefix) != len(rest) {
+			continue
 		}
+		for _, ref := range prev {
+			if len(ref.bytes) < minLen {
+				continue
+			}
+			if bytes.Equal(ref.bytes, rest) {
+				return fmt.Sprintf("cat(%s, %s)", enc.label, formatRef(ref)), true
+			}
+		}
+		return fmt.Sprintf("cat(%s, %s)", enc.label, formatBytesShort(rest)), true
 	}
-	return fmt.Sprintf("cat(len:2, %s)", formatBytesShort(rest)), true
+	return "", false
 }
 
 func findPrefixSuffix(value []byte, prev []valueRef, minLen int) (string, bool) {
@@ -329,16 +347,14 @@ func formatBytesShort(b []byte) string {
 }
 
 func eventCall(t term.Term) (string, []term.Term, bool) {
-	// Normalize pair-wrapped calls into name + args.
+	// Normalize events into name + call arguments while preserving return values separately.
 	fn, err := term.AsFunction(t)
 	if err != nil || fn == nil {
 		return "", nil, false
 	}
 	if fn.Name == term.PairFunctionName && len(fn.Args) == 2 {
 		if call, err := term.AsFunction(fn.Args[0]); err == nil && call != nil {
-			args := append([]term.Term{}, call.Args...)
-			args = append(args, fn.Args[1])
-			return call.Name, args, true
+			return call.Name, append([]term.Term{}, call.Args...), true
 		}
 	}
 	return fn.Name, fn.Args, true
@@ -351,10 +367,12 @@ func buildFormatReport(inferences []inference) string {
 	}
 	type key struct {
 		name string
+		arg  int
 		expr string
 	}
 	type patternKey struct {
 		name  string
+		arg   int
 		shape string
 	}
 
@@ -363,13 +381,13 @@ func buildFormatReport(inferences []inference) string {
 	eventTotals := map[string]int{}
 	byEvent := map[string][]key{}
 	for _, inf := range inferences {
-		k := key{name: inf.eventName, expr: inf.expr}
+		k := key{name: inf.eventName, arg: inf.argIndex, expr: inf.expr}
 		grouped[k] = append(grouped[k], inf)
 		shape := strings.TrimSpace(inf.lengthExpr)
 		if shape == "" {
 			shape = normalizeExprShape(inf.expr)
 		}
-		sk := patternKey{name: inf.eventName, shape: shape}
+		sk := patternKey{name: inf.eventName, arg: inf.argIndex, shape: shape}
 		shapeGrouped[sk] = append(shapeGrouped[sk], inf)
 		eventTotals[inf.eventName]++
 	}
@@ -380,7 +398,10 @@ func buildFormatReport(inferences []inference) string {
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].name == keys[j].name {
-			return keys[i].expr < keys[j].expr
+			if keys[i].arg == keys[j].arg {
+				return keys[i].expr < keys[j].expr
+			}
+			return keys[i].arg < keys[j].arg
 		}
 		return keys[i].name < keys[j].name
 	})
@@ -391,7 +412,7 @@ func buildFormatReport(inferences []inference) string {
 
 	// Summary section: highlight repeated/recurring format shapes first.
 	b.WriteString("Summary:\n")
-	b.WriteString(fmt.Sprintf("  Total inferences: %d\n", len(inferences)))
+	fmt.Fprintf(&b, "  Total inferences: %d\n", len(inferences))
 	var eventNames []string
 	for name := range eventTotals {
 		eventNames = append(eventNames, name)
@@ -408,7 +429,10 @@ func buildFormatReport(inferences []inference) string {
 			li := len(shapeGrouped[patterns[i]])
 			lj := len(shapeGrouped[patterns[j]])
 			if li == lj {
-				return patterns[i].shape < patterns[j].shape
+				if patterns[i].arg == patterns[j].arg {
+					return patterns[i].shape < patterns[j].shape
+				}
+				return patterns[i].arg < patterns[j].arg
 			}
 			return li > lj
 		})
@@ -418,7 +442,7 @@ func buildFormatReport(inferences []inference) string {
 		top := patterns[0]
 		fmt.Fprintf(&b, "  %s:\n", name)
 		fmt.Fprintf(&b, "    Count: %d inference%s\n", eventTotals[name], plural(eventTotals[name]))
-		fmt.Fprintf(&b, "    Dominant pattern: %s(%s)\n", name, top.shape)
+		fmt.Fprintf(&b, "    Dominant pattern: a%d=%s\n", top.arg, top.shape)
 	}
 	b.WriteString("\n")
 	b.WriteString("Detailed Patterns:\n")
@@ -426,7 +450,10 @@ func buildFormatReport(inferences []inference) string {
 		eventKeys := byEvent[name]
 		sort.Slice(eventKeys, func(i, j int) bool {
 			if len(grouped[eventKeys[i]]) == len(grouped[eventKeys[j]]) {
-				return eventKeys[i].expr < eventKeys[j].expr
+				if eventKeys[i].arg == eventKeys[j].arg {
+					return eventKeys[i].expr < eventKeys[j].expr
+				}
+				return eventKeys[i].arg < eventKeys[j].arg
 			}
 			return len(grouped[eventKeys[i]]) > len(grouped[eventKeys[j]])
 		})
@@ -434,11 +461,11 @@ func buildFormatReport(inferences []inference) string {
 		for _, k := range eventKeys {
 			list := grouped[k]
 			conf := list[0].confidence
-			fmt.Fprintf(&b, "    Pattern: %s(%s)\n", k.name, k.expr)
+			fmt.Fprintf(&b, "    Pattern: a%d=%s\n", k.arg, k.expr)
 			fmt.Fprintf(&b, "      Occurrences: %d\n", len(list))
 			fmt.Fprintf(&b, "      Evidence:\n")
 			for i := 0; i < min(len(list), 3); i++ {
-				fmt.Fprintf(&b, "        - Line %d\n", list[i].eventIndex)
+				fmt.Fprintf(&b, "        - Event %d\n", list[i].eventIndex)
 			}
 			fmt.Fprintf(&b, "      Confidence: %s\n", conf)
 		}
@@ -450,7 +477,7 @@ func buildFormatReport(inferences []inference) string {
 		if strings.TrimSpace(inf.lengthExpr) == "" {
 			continue
 		}
-		lengthCounts[inf.lengthExpr]++
+		lengthCounts[fmt.Sprintf("a%d=%s", inf.argIndex, inf.lengthExpr)]++
 	}
 	if len(lengthCounts) > 0 {
 		b.WriteString("Length Pattern Summary:\n")
@@ -478,12 +505,11 @@ func buildFormatReport(inferences []inference) string {
 
 var (
 	eventRefRE = regexp.MustCompile(`e\d+_a\d+`)
-	lenRefRE   = regexp.MustCompile(`len:\d+`)
+	lenRefRE   = regexp.MustCompile(`len(?:be|le)?:\d+`)
 	hexRefRE   = regexp.MustCompile(`0x[0-9a-fA-F]+`)
 )
 
 func normalizeExprShape(expr string) string {
-	labels := []string{"x", "y", "z", "w", "u", "v", "p", "q", "r", "s"}
 	refOrder := map[string]int{}
 	refSeq := 0
 	shape := eventRefRE.ReplaceAllStringFunc(expr, func(match string) string {
@@ -493,8 +519,7 @@ func normalizeExprShape(expr string) string {
 			refOrder[match] = idx
 			refSeq++
 		}
-		label := labels[idx%len(labels)]
-		return fmt.Sprintf("<bytes:%s>", label)
+		return fmt.Sprintf("<bytes:x%d>", idx+1)
 	})
 	shape = lenRefRE.ReplaceAllString(shape, "len")
 	shape = hexRefRE.ReplaceAllString(shape, "hex")

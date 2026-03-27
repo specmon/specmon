@@ -24,13 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
-	"github.com/fatih/color"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/specmon/specmon/data"
@@ -74,21 +71,6 @@ type Monitor struct {
 
 	// stats includes the statistics of the monitor.
 	stats *Stats
-
-	// showAllEvents controls whether expected events are truncated in errors.
-	showAllEvents bool
-
-	// showAllConfigs controls whether all configs are listed on errors.
-	showAllConfigs bool
-
-	// traceConfig selects a specific config to display (1-based).
-	traceConfig int
-
-	// pauseFlag pauses processing when set to 1.
-	pauseFlag *uint32
-
-	// errorHandler receives structured no-applicable-rule diagnostics.
-	errorHandler func(line int, event term.Term, details string)
 }
 
 func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
@@ -114,35 +96,6 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 		configs: data.NewHashSet(NewConfig()),
 		stats:   &Stats{},
 	}, nil
-}
-
-// SetShowAllEvents toggles truncation for expected event listings.
-func (m *Monitor) SetShowAllEvents(show bool) {
-	// Toggle truncation for expected-event lists in error output.
-	m.showAllEvents = show
-}
-
-// SetShowAllConfigs toggles whether all configurations are listed on errors.
-func (m *Monitor) SetShowAllConfigs(show bool) {
-	// Toggle whether all configurations are shown on errors.
-	m.showAllConfigs = show
-}
-
-// SetTraceConfig selects a specific configuration to display (1-based).
-func (m *Monitor) SetTraceConfig(n int) {
-	// Select a specific configuration to display on errors (1-based).
-	m.traceConfig = n
-}
-
-// SetPauseFlag sets a pause flag checked during event processing.
-func (m *Monitor) SetPauseFlag(flag *uint32) {
-	// Pause processing when the live dashboard requests it.
-	m.pauseFlag = flag
-}
-
-// SetErrorHandler registers a callback for no-applicable-rule diagnostics.
-func (m *Monitor) SetErrorHandler(handler func(line int, event term.Term, details string)) {
-	m.errorHandler = handler
 }
 
 // Configs returns the configurations of the monitor.
@@ -238,28 +191,6 @@ func (m *Monitor) ProcessEvent(a term.Term) error {
 	m.configs = updated
 
 	return nil
-}
-
-// findPossibleEvents returns the events that are possible in each configuration.
-func (m *Monitor) findPossibleEvents() [][]term.Term {
-	events := make([][]term.Term, m.configs.Size())
-
-	for i, c := range m.configs.Values() {
-		var e []term.Term
-		for _, rs := range m.rules {
-			for _, r := range rs {
-				for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
-					s := r.Subst(b)
-					e = append(e, s.Hints()...)
-					e = append(e, s.Triggers()...)
-				}
-			}
-		}
-
-		events[i] = e
-	}
-
-	return events
 }
 
 // getUniqueBinding returns the bindings that match a term.
@@ -585,18 +516,10 @@ type TimedEvent struct {
 	Event *term.Function `json:"event"`
 }
 
-// ConsumedEvent represents a processed event and an acknowledgement hook.
-type ConsumedEvent struct {
-	Term term.Term
-	Ack  chan struct{}
-}
-
-// Done acknowledges that the event line has been fully handled by the consumer.
-func (e *ConsumedEvent) Done() {
-	if e == nil || e.Ack == nil {
-		return
-	}
-	close(e.Ack)
+type ProcessError struct {
+	Line  int
+	Event term.Term
+	Err   error
 }
 
 type Stats struct {
@@ -724,15 +647,17 @@ func ParseEvents(r io.Reader, pid int) <-chan *TimedEvent {
 
 // ProcessEvents processes events from a channel and returns output channels.
 // This is the core processing function that handles the monitoring logic.
-func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int) (<-chan *TimedEvent, <-chan *ConsumedEvent) {
+func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term, <-chan *ProcessError) {
 	out := make(chan *TimedEvent, outChanSize)
-	consumed := make(chan *ConsumedEvent)
+	consumed := make(chan term.Term)
+	errs := make(chan *ProcessError, 1)
 
 	m.stats.StartTime = time.Now()
 
 	go func() {
 		defer close(out)
 		defer close(consumed)
+		defer close(errs)
 		defer func() { m.stats.EndTime = time.Now() }()
 
 		line := 0
@@ -745,23 +670,9 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 				log.Fatalf("event is nil: %v", event)
 			}
 
-			for m.pauseFlag != nil && atomic.LoadUint32(m.pauseFlag) == 1 {
-				time.Sleep(50 * time.Millisecond)
-			}
-
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
 
 			if err := m.ProcessEvent(event.Event); err != nil {
-				if errors.Is(err, ErrNoApplicableRule) {
-					details := m.formatNoApplicableRule(event.Event, line)
-					if m.errorHandler != nil {
-						m.errorHandler(line, event.Event, details)
-					} else {
-						fmt.Fprintln(os.Stdout, formatErrorLineMarker(line, event.Event))
-						fmt.Fprintln(os.Stdout)
-						fmt.Fprintln(os.Stdout, details)
-					}
-				}
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
 					for _, f := range c.facts {
@@ -772,6 +683,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 				if err := utils.KillProcess(pid); err != nil {
 					log.Errorf("failed to kill process: %v", err)
 				}
+				errs <- &ProcessError{Line: line, Event: event.Event, Err: err}
 				return
 			}
 
@@ -792,9 +704,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 					}
 				}
 			} else {
-				ce := &ConsumedEvent{Term: event.Event, Ack: make(chan struct{})}
-				consumed <- ce
-				<-ce.Ack
+				consumed <- event.Event
 			}
 		}
 
@@ -806,15 +716,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 		}
 	}()
 
-	return out, consumed
-}
-
-func formatErrorLineMarker(line int, event term.Term) string {
-	marker := "✗"
-	if !color.NoColor {
-		marker = color.New(color.FgRed).Sprint("✗")
-	}
-	return fmt.Sprintf("%s %4d  %s", marker, line, event)
+	return out, consumed, errs
 }
 
 func getRewriteTerm(f *rule.Fact) term.Term {
@@ -828,6 +730,29 @@ func getRewriteTerm(f *rule.Fact) term.Term {
 type possibleEvent struct {
 	ruleName string
 	term     term.Term
+}
+
+type ExpectedEvent struct {
+	RuleName string
+	Term     term.Term
+	Name     string
+	Arity    int
+}
+
+type ConfigExpectedEvents struct {
+	Index  int
+	Events []ExpectedEvent
+}
+
+type NoApplicableRuleDetails struct {
+	Line                int
+	Event               term.Term
+	Reason              string
+	ConfigCount         int
+	Configs             []ConfigExpectedEvents
+	MissingTraceConfig  int
+	ShowAllConfigsHint  bool
+	ShowTraceConfigHint bool
 }
 
 func (m *Monitor) findPossibleEventsWithRules() [][]possibleEvent {
@@ -856,33 +781,20 @@ func (m *Monitor) findPossibleEventsWithRules() [][]possibleEvent {
 	return events
 }
 
-func (m *Monitor) formatNoApplicableRule(event term.Term, line int) string {
-	// Build a structured error message with grouped expected events.
-	var b strings.Builder
-	headline := "✗ ERROR: Event Processing Failed"
-	if !color.NoColor {
-		headline = color.New(color.FgRed, color.Bold).Sprint(headline)
-	}
-	fmt.Fprintln(&b, headline)
-	fmt.Fprintf(&b, "  Event: %s\n", event)
-	if line > 0 {
-		fmt.Fprintf(&b, "  Line: %d\n", line)
-	}
-	fmt.Fprintf(&b, "  Reason: No applicable rule found\n")
-	fmt.Fprintln(&b)
-
+func (m *Monitor) BuildNoApplicableRuleDetails(event term.Term, line int, showAllConfigs bool, traceConfig int) NoApplicableRuleDetails {
+	// Build structured no-applicable-rule diagnostics for the CLI layer.
 	configCount := m.configs.Size()
-	if configCount > 1 {
-		fmt.Fprintf(&b, "WARNING: Multiple Configurations Detected (%d)\n", configCount)
-		fmt.Fprintln(&b, "  The specification has branched into multiple possible states.")
-		fmt.Fprintln(&b, "  Allowed events differ by configuration.")
+	details := NoApplicableRuleDetails{
+		Line:        line,
+		Event:       event,
+		Reason:      ErrNoApplicableRule.Error(),
+		ConfigCount: configCount,
 	}
 
 	possibleEvents := m.findPossibleEventsWithRules()
-	showAll := m.showAllConfigs
-	traceConfig := m.traceConfig
+	showAll := showAllConfigs
 	if traceConfig > 0 && traceConfig > configCount {
-		fmt.Fprintf(&b, "\nWARNING: Config #%d not found; showing all configs\n", traceConfig)
+		details.MissingTraceConfig = traceConfig
 		showAll = true
 		traceConfig = 0
 	}
@@ -896,139 +808,31 @@ func (m *Monitor) formatNoApplicableRule(event term.Term, line int) string {
 			if !showAll && traceConfig == 0 && configNum != 1 {
 				continue
 			}
-			fmt.Fprintf(&b, "\nConfig #%d:\n", configNum)
 		}
-		formatPossibleEvents(&b, events, m.showAllEvents)
+
+		cfg := ConfigExpectedEvents{Index: configNum}
+		for _, ev := range events {
+			name, arity, ok := eventNameArity(ev.term)
+			if !ok {
+				name = "unknown"
+				arity = 0
+			}
+			cfg.Events = append(cfg.Events, ExpectedEvent{
+				RuleName: ev.ruleName,
+				Term:     ev.term,
+				Name:     name,
+				Arity:    arity,
+			})
+		}
+		details.Configs = append(details.Configs, cfg)
 	}
 
 	if configCount > 1 && !showAll && traceConfig == 0 {
-		fmt.Fprintln(&b, "Use --trace-config=N to follow specific configuration")
-		fmt.Fprintln(&b, "Use --show-all-configs to see all possible events per configuration")
+		details.ShowTraceConfigHint = true
+		details.ShowAllConfigsHint = true
 	}
 
-	return b.String()
-}
-
-func formatPossibleEvents(b *strings.Builder, events []possibleEvent, showAll bool) {
-	// Group expected events by category/name and print a limited, readable list.
-	const defaultMaxPerGroup = 10
-	const defaultMaxOther = 5
-	maxPerGroup := defaultMaxPerGroup
-	maxOther := defaultMaxOther
-	if showAll {
-		maxPerGroup = len(events)
-		maxOther = len(events)
-	}
-
-	groups := groupEvents(events)
-	if len(groups) == 0 {
-		fmt.Fprintln(b, "No expected events available.")
-		return
-	}
-	order := []string{"send", "receive", "random"}
-	labels := map[string]string{
-		"send":    "Network Send",
-		"receive": "Network Receive",
-		"random":  "Fresh Random",
-	}
-	truncated := false
-
-	hasPrimaryGroups := false
-	for _, category := range order {
-		if len(groups[category]) > 0 {
-			hasPrimaryGroups = true
-			break
-		}
-	}
-	if hasPrimaryGroups {
-		showCount := min(maxPerGroup, len(events))
-		fmt.Fprintf(b, "Expected Events (showing %d of %d, grouped by event name):\n\n", showCount, len(events))
-	}
-
-	for _, category := range order {
-		items := groups[category]
-		if len(items) == 0 {
-			continue
-		}
-
-		for _, g := range items {
-			fmt.Fprintf(b, "%s/%d - %s:\n", g.name, g.arity, labels[category])
-			limit := min(len(g.items), maxPerGroup)
-			for i := 0; i < limit; i++ {
-				fmt.Fprintf(b, "  [%s] %s\n", g.items[i].ruleName, g.items[i].term)
-			}
-			if len(g.items) > maxPerGroup {
-				fmt.Fprintf(b, "  ... (%d more)\n", len(g.items)-maxPerGroup)
-				truncated = true
-			}
-			fmt.Fprintln(b)
-		}
-	}
-
-	otherItems := groups["other"]
-	if len(otherItems) > 0 {
-		var flat []possibleEvent
-		for _, g := range otherItems {
-			flat = append(flat, g.items...)
-		}
-		limit := min(len(flat), maxOther)
-		fmt.Fprintf(b, "Other Events (%d total, showing %d):\n", len(flat), limit)
-		for i := 0; i < limit; i++ {
-			fmt.Fprintf(b, "  [%s] %s\n", flat[i].ruleName, flat[i].term)
-		}
-		if len(flat) > maxOther {
-			truncated = true
-		}
-		fmt.Fprintln(b)
-	}
-
-	if truncated {
-		fmt.Fprintf(b, "Use --show-all-events to see all %d possibilities\n", len(events))
-		fmt.Fprintln(b, "Use --debug for full trace and rule details")
-	}
-}
-
-type eventGroup struct {
-	name  string
-	arity int
-	items []possibleEvent
-}
-
-func groupEvents(events []possibleEvent) map[string][]eventGroup {
-	// Group events by category and name/arity for display.
-	grouped := make(map[string]map[string]*eventGroup)
-
-	for _, e := range events {
-		name, arity, ok := eventNameArity(e.term)
-		if !ok {
-			name = "unknown"
-			arity = 0
-		}
-		category := eventCategory(name)
-		if grouped[category] == nil {
-			grouped[category] = make(map[string]*eventGroup)
-		}
-		key := fmt.Sprintf("%s/%d", name, arity)
-		if grouped[category][key] == nil {
-			grouped[category][key] = &eventGroup{name: name, arity: arity}
-		}
-		grouped[category][key].items = append(grouped[category][key].items, e)
-	}
-
-	result := make(map[string][]eventGroup)
-	for category, groups := range grouped {
-		for _, g := range groups {
-			result[category] = append(result[category], *g)
-		}
-		sort.Slice(result[category], func(i, j int) bool {
-			if result[category][i].name == result[category][j].name {
-				return result[category][i].arity < result[category][j].arity
-			}
-			return result[category][i].name < result[category][j].name
-		})
-	}
-
-	return result
+	return details
 }
 
 func eventNameArity(t term.Term) (string, int, bool) {
@@ -1045,20 +849,6 @@ func eventNameArity(t term.Term) (string, int, bool) {
 	}
 
 	return fn.Name, len(fn.Args), true
-}
-
-func eventCategory(name string) string {
-	// Map event names into semantic categories used in the error display.
-	switch strings.ToLower(name) {
-	case "send", "out", "sendmessage":
-		return "send"
-	case "recv", "receive", "in", "receivemessage":
-		return "receive"
-	case "random", "fr":
-		return "random"
-	default:
-		return "other"
-	}
 }
 
 // CheckWellformedness checks if the rules are well-formed.
