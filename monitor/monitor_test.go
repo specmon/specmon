@@ -21,6 +21,7 @@ package monitor_test
 import (
 	"testing"
 
+	"github.com/specmon/specmon/cmd"
 	"github.com/specmon/specmon/monitor"
 	"github.com/specmon/specmon/rule"
 	"github.com/specmon/specmon/term"
@@ -51,8 +52,12 @@ func TestMonitorMultipleFrFacts(t *testing.T) {
 		},
 	}
 
+	// Retrieve User Settings
+	// factArgMaxLen specifies the maximum length of a fact's arguments before they are truncated in log output.
+	truncateArgs, _ := cmd.Root().Flags().GetInt64("truncate-args")
+
 	// Create monitor with this rule
-	mon, err := monitor.NewMonitor([]*rule.Rule{testRule})
+	mon, err := monitor.NewMonitor([]*rule.Rule{testRule}, &monitor.Settings{TruncateArgs: truncateArgs})
 	if err != nil {
 		t.Fatalf("Failed to create monitor: %v", err)
 	}
@@ -177,7 +182,7 @@ func TestMonitorRestrictionViolation(t *testing.T) {
 	}
 
 	// Create monitor with all three rules
-	mon, err := monitor.NewMonitor([]*rule.Rule{inRule, ruleA, ruleB})
+	mon, err := monitor.NewMonitor([]*rule.Rule{inRule, ruleA, ruleB}, &monitor.Settings{TruncateArgs: 0})
 	if err != nil {
 		t.Fatalf("Failed to create monitor: %v", err)
 	}

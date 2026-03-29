@@ -95,6 +95,13 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 				// Handle []string type
 				cmd.PersistentFlags().StringSliceVarP(fieldValue.Addr().Interface().(*[]string), flag, short, nil, desc)
 			}
+		case reflect.Int64:
+			// Handle int64 type
+			value := fieldValue.Int()
+			if field.Name == "TruncateArgs" {
+				value = -1
+			}
+			cmd.PersistentFlags().Int64VarP(fieldValue.Addr().Interface().(*int64), flag, short, value, desc)
 		default:
 			// Ignore unsupported fields
 		}

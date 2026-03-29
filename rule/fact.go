@@ -26,7 +26,10 @@ import (
 	"slices"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/specmon/specmon/term"
+	"github.com/specmon/specmon/utils"
 )
 
 type FactType string
@@ -249,4 +252,35 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	}
 
 	return newFacts
+}
+
+//	 LogArgs logs a formatted representation of the fact's name and arguments.
+//		if truncateArgs is 0 do not print arguments.
+//		if truncateArgs is -1 print full arg string.
+//		else print max length printed for each arg is truncateArgs.
+func (f *Fact) LogArgs(truncateArgs int64) {
+	// retrieve Settings
+	argMaxLen := truncateArgs
+
+	// check if printing arguments is disabled
+	if argMaxLen == 0 {
+		log.Warnf("  %s", f.Name)
+		return
+	}
+
+	// construct argument string
+	var b strings.Builder
+	for i, arg := range f.Args {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		argStr := arg.String()
+		if argMaxLen != -1 {
+			argStr = utils.TruncateString(argStr, argMaxLen)
+		}
+		b.WriteString(argStr)
+	}
+
+	// print as warning
+	log.Warnf("  %s(%s)", f.Name, b.String())
 }

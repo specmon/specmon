@@ -82,8 +82,13 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 	defer eventSource.Close()
 
+	// Retrieve User Settings
+	// factArgMaxLen specifies the maximum length of a fact's arguments before they are truncated in log output.
+	truncateArgs, _ := cmd.Root().Flags().GetInt64("truncate-args")
+	// Define User Settings for Monitor
+	settings := &monitor.Settings{TruncateArgs: truncateArgs}
 	// Create the main monitor
-	m, err = monitor.NewMonitor(decompRules)
+	m, err = monitor.NewMonitor(decompRules, settings)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
@@ -117,7 +122,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		}
 
 		// 2) Live events: rewriter -> main monitor via channel
-		rewriter, err := monitor.NewMonitor(rewriteRules)
+		rewriter, err := monitor.NewMonitor(rewriteRules, settings)
 		if err != nil {
 			return fmt.Errorf("cannot create rewrite monitor: %w", err)
 		}
