@@ -46,6 +46,7 @@ const (
 	AndFunctionName   = "and"
 	OrFunctionName    = "or"
 	AddFunctionName   = "add"
+	XorFunctionName   = "xor"
 	BinaryArity       = 2
 	TernaryArity      = 3
 
@@ -59,6 +60,7 @@ var ReservedNames = data.NewSet[string](
 	AddFunctionName,
 	AndFunctionName,
 	OrFunctionName,
+	XorFunctionName,
 	string(FormatIntType),
 	string(FormatStringType),
 	string(FormatByteType))
@@ -895,7 +897,7 @@ func Evaluate(t Term) (Term, error) {
 	switch f.Name {
 	case CatFunctionName:
 		return handleCatFunction(f, newArgs, modified)
-	case AddFunctionName, AndFunctionName, OrFunctionName:
+	case AddFunctionName, AndFunctionName, OrFunctionName, XorFunctionName:
 		return handleArithmeticFunction(f, newArgs, modified)
 	case SliceFunctionName:
 		return handleSliceFunction(f, newArgs, modified)
@@ -999,6 +1001,8 @@ func handleArithmeticFunction(f *Function, args []Term, modified bool) (Term, er
 		result = left & right
 	case OrFunctionName:
 		result = left | right
+	case XorFunctionName:
+		result = left ^ right
 	}
 
 	// Result type is the same as the type of the first argument.
