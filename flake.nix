@@ -15,6 +15,7 @@
         buildInputs = [
           pkgs.go_1_26
 	  pkgs.gotools
+	  pkgs.gofumpt
 	  pkgs.gopls
 	  pkgs.golangci-lint
 	  pkgs.nodejs
