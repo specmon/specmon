@@ -1,0 +1,163 @@
+name: docs-site
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '9'
+  ASTRO_SITE_URL: 'https://specmon.github.io/specmon/'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: docs
+
+      - name: Determine deployment target
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ref="${GITHUB_REF}"
+          if [[ "${ref}" == "refs/heads/main" ]]; then
+            target_dir="stable"
+            base="/specmon/"
+            mirror_root="true"
+            label="stable"
+          elif [[ "${ref}" == "refs/heads/develop" ]]; then
+            target_dir="dev"
+            base="/specmon/dev/"
+            mirror_root="false"
+            label="develop"
+          elif [[ "${ref}" == refs/tags/* ]]; then
+            version="${ref#refs/tags/}"
+            target_dir="releases/${version}"
+            base="/specmon/releases/${version}/"
+            mirror_root="false"
+            label="${version}"
+          else
+            safe_ref="${ref#refs/}"
+            safe_ref="${safe_ref//\//-}"
+            target_dir="branches/${safe_ref}"
+            base="/specmon/branches/${safe_ref}/"
+            mirror_root="false"
+            label="${safe_ref}"
+          fi
+
+          printf 'target_dir=%s\n' "${target_dir}" >> "${GITHUB_OUTPUT}"
+          printf 'base=%s\n' "${base}" >> "${GITHUB_OUTPUT}"
+          printf 'mirror_root=%s\n' "${mirror_root}" >> "${GITHUB_OUTPUT}"
+          printf 'label=%s\n' "${label}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build documentation
+        env:
+          ASTRO_BASE: ${{ steps.meta.outputs.base }}
+          ASTRO_SITE: ${{ env.ASTRO_SITE_URL }}
+        run: pnpm run build
+        working-directory: docs
+
+      - name: Checkout gh-pages branch
+        id: checkout-pages
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: .gh-pages
+          persist-credentials: false
+
+      - name: Prepare gh-pages workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ steps.checkout-pages.outcome }}" != "success" ]]; then
+            rm -rf .gh-pages
+            mkdir .gh-pages
+            (
+              cd .gh-pages
+              git init
+              git checkout -b gh-pages
+            )
+          fi
+
+          (
+            cd .gh-pages
+            git config user.name "specmon-bot"
+            git config user.email "specmon@users.noreply.github.com"
+            if git remote | grep -q '^origin$'; then
+              git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            else
+              git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            fi
+          )
+
+      - name: Sync generated site into gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_dir="${{ steps.meta.outputs.target_dir }}"
+          mirror_root="${{ steps.meta.outputs.mirror_root }}"
+
+          mkdir -p ".gh-pages/${target_dir}"
+          touch .gh-pages/.nojekyll
+
+          if [[ "${mirror_root}" == "true" ]]; then
+            rsync -a --delete \
+              --exclude '.git' \
+              --exclude 'CNAME' \
+              --exclude 'dev' \
+              --exclude 'branches' \
+              --exclude 'releases' \
+              --exclude 'stable' \
+              docs/dist/ .gh-pages/
+
+            rsync -a --delete docs/dist/ ".gh-pages/stable/"
+          else
+            rsync -a --delete docs/dist/ ".gh-pages/${target_dir}/"
+          fi
+
+      - name: Commit and push documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd .gh-pages
+            git add .
+            if git diff --cached --quiet; then
+              echo "No documentation changes to commit."
+              exit 0
+            fi
+            git commit -m "docs: publish ${{ steps.meta.outputs.label }} docs (${GITHUB_SHA::7})"
+            git push origin gh-pages
+          )
