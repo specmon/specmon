@@ -82,8 +82,7 @@ func (p *Preprocessor) handlePreprocessor(node *sitter.Node, out *bytes.Buffer) 
 			return // No condition found
 		}
 
-		condition := conditionNode.Utf8Text(p.source)
-		if p.defines[condition] {
+		if p.evalCondition(conditionNode) {
 			// Condition is true, process all 'consequence' nodes
 			consequenceNodes := childrenByFieldName(node, "consequence")
 			for _, conseqNode := range consequenceNodes {
@@ -97,4 +96,71 @@ func (p *Preprocessor) handlePreprocessor(node *sitter.Node, out *bytes.Buffer) 
 			}
 		}
 	}
+}
+
+// evalCondition evaluates an ifdef condition node, supporting the grammar's
+// nested boolean operators: ident, ifdef_nested, ifdef_not, ifdef_and, ifdef_or.
+func (p *Preprocessor) evalCondition(node *sitter.Node) bool {
+	switch node.Kind() {
+	case "ident":
+		return p.defines[node.Utf8Text(p.source)]
+	case "ifdef_nested":
+		// '(' formula ')'
+		for i := uint(0); i < node.ChildCount(); i++ {
+			c := node.Child(i)
+			if isFormula(c) {
+				return p.evalCondition(c)
+			}
+		}
+		return false
+	case "ifdef_not":
+		// 'not' formula
+		for i := uint(0); i < node.ChildCount(); i++ {
+			c := node.Child(i)
+			if isFormula(c) {
+				return !p.evalCondition(c)
+			}
+		}
+		return false
+	case "ifdef_and":
+		left, right := formulaOperands(node)
+		if left == nil || right == nil {
+			return false
+		}
+		return p.evalCondition(left) && p.evalCondition(right)
+	case "ifdef_or":
+		left, right := formulaOperands(node)
+		if left == nil || right == nil {
+			return false
+		}
+		return p.evalCondition(left) || p.evalCondition(right)
+	default:
+		// Fallback: treat the entire text as a single ident for backward compat.
+		return p.defines[node.Utf8Text(p.source)]
+	}
+}
+
+func isFormula(n *sitter.Node) bool {
+	switch n.Kind() {
+	case "ident", "ifdef_nested", "ifdef_not", "ifdef_and", "ifdef_or":
+		return true
+	}
+	return false
+}
+
+func formulaOperands(node *sitter.Node) (*sitter.Node, *sitter.Node) {
+	var left, right *sitter.Node
+	for i := uint(0); i < node.ChildCount(); i++ {
+		c := node.Child(i)
+		if !isFormula(c) {
+			continue
+		}
+		if left == nil {
+			left = c
+		} else {
+			right = c
+			break
+		}
+	}
+	return left, right
 }

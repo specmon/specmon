@@ -87,6 +87,27 @@ macros:
 
 This pattern keeps the rules unchanged while swapping the macro expansions based on your chosen preprocessor symbol.
 
+### Boolean operators in `#ifdef`
+
+Conditions accept `not`, `&`, `|`, and parentheses, matching Tamarin's preprocessor. This lets a single condition gate a section without introducing an extra positive sentinel define.
+
+```tamarin
+#ifdef not SPECMON
+// Verification-only section: included unless --defines SPECMON is set.
+#endif
+
+#ifdef Properties & not Sanity
+// Included when Properties is defined and Sanity is not.
+#endif
+
+#ifdef (Properties | Sanity) & not Release
+// Included when at least one of Properties or Sanity is defined,
+// and Release is not.
+#endif
+```
+
+A bare identifier without operators continues to work as before.
+
 ### Monitoring-specific setup (optional)
 
 Some models include monitoring-only setup rules (for example, reading keys from instrumentation events) and verification-only setup rules (for example, generating fresh keys with `Fr`). Keep these differences minimal and tightly scoped.
