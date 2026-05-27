@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -31,7 +32,7 @@ type Hasher interface {
 }
 
 type HashMap[K, V any] struct {
-	m map[uint64]Entry[K, V]
+	m map[uint64][]Entry[K, V]
 	h hash.Hash64
 }
 
@@ -40,9 +41,36 @@ type Entry[K, V any] struct {
 	Value V
 }
 
+// equaler[K] is the contract used to disambiguate two K values that
+// land in the same hash bucket. It must be a symmetric equivalence
+// relation: a.Equal(b) == b.Equal(a). Asymmetric implementations
+// (e.g. a subset test) will silently dedupe distinct keys when their
+// hashes happen to collide.
+type equaler[K any] interface {
+	Equal(K) bool
+}
+
+// keysEqual compares two K values for in-bucket equality, in this order:
+//  1. K's own Equal[K] method, if implemented.
+//  2. Go's == operator, if K is comparable (e.g. pointers, structs of
+//     comparables).
+//  3. reflect.DeepEqual as a last resort, for non-comparable composite
+//     types like []T or map[K]V. This path is rare in production —
+//     the codebase uses pointer or Equaler keys — but is required by
+//     HashSet[[]int] in tests.
+func keysEqual[K any](a, b K) bool {
+	if eq, ok := any(a).(equaler[K]); ok {
+		return eq.Equal(b)
+	}
+	if t := reflect.TypeOf(a); t != nil && t.Comparable() {
+		return any(a) == any(b)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 func NewHashMap[K, V any]() *HashMap[K, V] {
 	return &HashMap[K, V]{
-		m: make(map[uint64]Entry[K, V]),
+		m: make(map[uint64][]Entry[K, V]),
 		h: fnv.New64a(),
 	}
 }
@@ -66,28 +94,62 @@ func (h *HashMap[K, V]) hash(k K) uint64 {
 }
 
 func (h *HashMap[K, V]) Get(k K) (V, bool) {
-	entry, ok := h.m[h.hash(k)]
-
-	return entry.Value, ok
+	var zero V
+	bucket, ok := h.m[h.hash(k)]
+	if !ok {
+		return zero, false
+	}
+	for _, entry := range bucket {
+		if keysEqual(entry.Key, k) {
+			return entry.Value, true
+		}
+	}
+	return zero, false
 }
 
 func (h *HashMap[K, V]) Set(k K, v V) {
-	h.m[h.hash(k)] = Entry[K, V]{k, v}
+	hash := h.hash(k)
+	bucket := h.m[hash]
+	for i, entry := range bucket {
+		if keysEqual(entry.Key, k) {
+			bucket[i].Value = v
+			h.m[hash] = bucket
+			return
+		}
+	}
+	h.m[hash] = append(bucket, Entry[K, V]{k, v})
 }
 
 func (h *HashMap[K, V]) Remove(k K) {
-	delete(h.m, h.hash(k))
+	hash := h.hash(k)
+	bucket, ok := h.m[hash]
+	if !ok {
+		return
+	}
+	for i, entry := range bucket {
+		if keysEqual(entry.Key, k) {
+			bucket = append(bucket[:i], bucket[i+1:]...)
+			if len(bucket) == 0 {
+				delete(h.m, hash)
+			} else {
+				h.m[hash] = bucket
+			}
+			return
+		}
+	}
 }
 
 func (h *HashMap[K, V]) Empty() bool {
-	return len(h.m) == 0
+	return h.Size() == 0
 }
 
 func (h *HashMap[K, V]) Keys() []K {
 	keys := make([]K, 0, h.Size())
 
-	for _, entry := range h.m {
-		keys = append(keys, entry.Key)
+	for _, bucket := range h.m {
+		for _, entry := range bucket {
+			keys = append(keys, entry.Key)
+		}
 	}
 
 	return keys
@@ -96,25 +158,33 @@ func (h *HashMap[K, V]) Keys() []K {
 func (h *HashMap[K, V]) Values() []V {
 	values := make([]V, 0, h.Size())
 
-	for _, entry := range h.m {
-		values = append(values, entry.Value)
+	for _, bucket := range h.m {
+		for _, entry := range bucket {
+			values = append(values, entry.Value)
+		}
 	}
 
 	return values
 }
 
 func (h *HashMap[K, V]) Size() int {
-	return len(h.m)
+	n := 0
+	for _, bucket := range h.m {
+		n += len(bucket)
+	}
+	return n
 }
 
 func (h *HashMap[K, V]) String() string {
 	s := "HashMap["
 
-	for _, entry := range h.m {
-		s += fmt.Sprintf("%v", entry.Key)
-		s += ":"
-		s += fmt.Sprintf("%v", entry.Value)
-		s += " "
+	for _, bucket := range h.m {
+		for _, entry := range bucket {
+			s += fmt.Sprintf("%v", entry.Key)
+			s += ":"
+			s += fmt.Sprintf("%v", entry.Value)
+			s += " "
+		}
 	}
 	s = strings.TrimSuffix(s, " ")
 
@@ -122,9 +192,11 @@ func (h *HashMap[K, V]) String() string {
 }
 
 func (h *HashMap[K, V]) Iterate(f func(K, V) bool) {
-	for _, entry := range h.m {
-		if !f(entry.Key, entry.Value) {
-			break
+	for _, bucket := range h.m {
+		for _, entry := range bucket {
+			if !f(entry.Key, entry.Value) {
+				return
+			}
 		}
 	}
 }
@@ -141,20 +213,24 @@ func (h *HashMap[K, V]) IterateSorted(f func(K, V) bool) {
 	})
 
 	for _, k := range keys {
-		entry := h.m[k]
-		if !f(entry.Key, entry.Value) {
-			break
+		for _, entry := range h.m[k] {
+			if !f(entry.Key, entry.Value) {
+				return
+			}
 		}
 	}
 }
 
 func (h *HashMap[K, V]) Clone() *HashMap[K, V] {
 	c := &HashMap[K, V]{
-		m: make(map[uint64]Entry[K, V], len(h.m)),
+		m: make(map[uint64][]Entry[K, V], len(h.m)),
+		h: fnv.New64a(),
 	}
 
-	for k, v := range h.m {
-		c.m[k] = v
+	for k, bucket := range h.m {
+		copied := make([]Entry[K, V], len(bucket))
+		copy(copied, bucket)
+		c.m[k] = copied
 	}
 
 	return c
@@ -163,9 +239,10 @@ func (h *HashMap[K, V]) Clone() *HashMap[K, V] {
 func (h *HashMap[K, V]) Extend(hp *HashMap[K, V]) *HashMap[K, V] {
 	u := h.Clone()
 
-	for k, v := range hp.m {
-		u.m[k] = v
-	}
+	hp.Iterate(func(k K, v V) bool {
+		u.Set(k, v)
+		return true
+	})
 
 	return u
 }
