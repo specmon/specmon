@@ -366,3 +366,150 @@ func TestEvaluate(t *testing.T) {
 		}
 	}
 }
+
+// Vars walks f(a, g(b, a), c) and returns variables in left-to-right
+// order with duplicates preserved. Pin this so the prealloc rewrite
+// can't silently reorder.
+func TestVarsOrder(t *testing.T) {
+	t.Parallel()
+
+	a := term.NewVariable("a")
+	b := term.NewVariable("b")
+	c := term.NewVariable("c")
+	tt := term.NewFunction("f", []term.Term{
+		a,
+		term.NewFunction("g", []term.Term{b, a}),
+		c,
+	})
+
+	got := term.Vars(tt)
+	want := []*term.Variable{a, b, a, c}
+	if len(got) != len(want) {
+		t.Fatalf("Vars returned %d variables; want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Vars[%d] = %q; want %q", i, got[i].Name, want[i].Name)
+		}
+	}
+}
+
+func TestVarCountAndIsGround(t *testing.T) {
+	t.Parallel()
+
+	a := term.NewVariable("a")
+	b := term.NewVariable("b")
+	c1 := term.NewConstant(1)
+
+	ground := term.NewFunction("h", []term.Term{c1, c1})
+	open := term.NewFunction("f", []term.Term{a, term.NewFunction("g", []term.Term{b, a}), c1})
+
+	if term.VarCount(ground) != 0 {
+		t.Errorf("VarCount(ground) = %d; want 0", term.VarCount(ground))
+	}
+	if !term.IsGround(ground) {
+		t.Errorf("IsGround(ground) = false; want true")
+	}
+
+	if term.VarCount(open) != len(term.Vars(open)) {
+		t.Errorf("VarCount(open) = %d; want %d (matches len(Vars))",
+			term.VarCount(open), len(term.Vars(open)))
+	}
+	if term.IsGround(open) {
+		t.Errorf("IsGround(open) = true; want false")
+	}
+}
+
+// SubstBinding's all-variable-keys fast path is now deliberately
+// chain-blind: {x->y, y->1} applied to x returns y, not 1. Callers that
+// need chain resolution must call ComputeFixpoint first. These cases
+// pin the contract so future "fixes" don't silently reintroduce
+// chain-following.
+func TestSubstBindingFastPath(t *testing.T) {
+	t.Parallel()
+
+	x := term.NewVariable("x")
+	y := term.NewVariable("y")
+	z := term.NewVariable("z")
+	one := term.NewConstant(1)
+
+	t.Run("empty binding returns g unchanged", func(t *testing.T) {
+		t.Parallel()
+		empty := term.NewBinding()
+		got := term.SubstBinding(empty, x)
+		if got != term.Term(x) {
+			t.Errorf("SubstBinding(empty, x) = %v; want x (identity)", got)
+		}
+	})
+
+	t.Run("single var to constant at top level", func(t *testing.T) {
+		t.Parallel()
+		b := term.NewBinding()
+		b.Set(x, one)
+		got := term.SubstBinding(b, x)
+		if !got.Equal(one) {
+			t.Errorf("SubstBinding({x->1}, x) = %v; want 1", got)
+		}
+	})
+
+	t.Run("nested function substitution returns rebuilt function", func(t *testing.T) {
+		t.Parallel()
+		b := term.NewBinding()
+		b.Set(x, one)
+		input := term.NewFunction("f", []term.Term{x, y})
+		got := term.SubstBinding(b, input)
+		want := term.NewFunction("f", []term.Term{one, y})
+		if !got.Equal(want) {
+			t.Errorf("SubstBinding({x->1}, f(x,y)) = %v; want %v", got, want)
+		}
+	})
+
+	t.Run("unchanged subtree (no var matches) returns identity", func(t *testing.T) {
+		t.Parallel()
+		b := term.NewBinding()
+		b.Set(z, one)
+		input := term.NewFunction("f", []term.Term{x, y})
+		got := term.SubstBinding(b, input)
+		if got != term.Term(input) {
+			t.Errorf("SubstBinding({z->1}, f(x,y)) should return the original pointer; got %v", got)
+		}
+	})
+
+	t.Run("chained binding without fixpoint returns intermediate", func(t *testing.T) {
+		t.Parallel()
+		// {x->y, y->1} applied to x: fast path does not follow chains.
+		b := term.NewBinding()
+		b.Set(x, y)
+		b.Set(y, one)
+		got := term.SubstBinding(b, x)
+		if !got.Equal(y) {
+			t.Errorf("SubstBinding({x->y, y->1}, x) = %v; want y (fast path is chain-blind)", got)
+		}
+	})
+
+	t.Run("chained binding with ComputeFixpoint resolves", func(t *testing.T) {
+		t.Parallel()
+		b := term.NewBinding()
+		b.Set(x, y)
+		b.Set(y, one)
+		fp := b.ComputeFixpoint()
+		got := term.SubstBinding(fp, x)
+		if !got.Equal(one) {
+			t.Errorf("SubstBinding(ComputeFixpoint({x->y, y->1}), x) = %v; want 1", got)
+		}
+	})
+
+	t.Run("non-variable key falls back to per-binding Replace", func(t *testing.T) {
+		t.Parallel()
+		// Map a function term to a variable; the all-variables fast
+		// path must be skipped so Replace can match the function.
+		fxy := term.NewFunction("f", []term.Term{x, y})
+		b := term.NewBinding()
+		b.Set(fxy, z)
+		got := term.SubstBinding(b, term.NewFunction("g", []term.Term{fxy}))
+		want := term.NewFunction("g", []term.Term{z})
+		if !got.Equal(want) {
+			t.Errorf("SubstBinding({f(x,y)->z}, g(f(x,y))) = %v; want %v", got, want)
+		}
+	})
+}
