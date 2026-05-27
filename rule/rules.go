@@ -27,7 +27,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/barkimedes/go-deepcopy"
 	"github.com/specmon/specmon/term"
 	"golang.org/x/exp/maps"
 )
@@ -221,9 +220,39 @@ func (r *Rule) IsGround() bool {
 	return true
 }
 
+// Clone returns a copy of r with independent LHS/Act/RHS slice headers and
+// an independent Attrs map. Facts and terms within those slices are
+// **shared** with the original rule — callers must treat the returned
+// rule's facts and their args as read-only.
+//
+// Returns nil when r is nil. When r.Attrs is nil, the clone's Attrs is an
+// empty (non-nil) map so callers can always assign into it.
 func (r *Rule) Clone() *Rule {
-	// deepcopy preserves the type.
-	return deepcopy.MustAnything(r).(*Rule)
+	if r == nil {
+		return nil
+	}
+
+	clone := &Rule{
+		Name: r.Name,
+		LHS:  append([]*Fact(nil), r.LHS...),
+		Act:  append([]*Fact(nil), r.Act...),
+		RHS:  append([]*Fact(nil), r.RHS...),
+	}
+
+	clone.Attrs = make(map[string]Attribute, len(r.Attrs))
+	for k, attr := range r.Attrs {
+		switch v := attr.(type) {
+		case StringAttribute:
+			clone.Attrs[k] = StringAttribute{Value: v.Value}
+		case TermAttribute:
+			terms := append([]term.Term(nil), v.Value...)
+			clone.Attrs[k] = TermAttribute{Value: terms}
+		default:
+			panic(fmt.Sprintf("rule.Clone: unknown Attribute type %T", attr))
+		}
+	}
+
+	return clone
 }
 
 func SortRule(r *Rule) {
