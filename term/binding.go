@@ -68,31 +68,22 @@ func (b *Binding) ComputeFixpoint() *Binding {
 	return c
 }
 
-// Equal reports whether b and bp bind the same keys to the same values.
-// It is symmetric: equal sizes plus the receiver's keys all matching the
-// argument's values implies the reverse direction holds too.
 func (b *Binding) Equal(bp *Binding) bool {
-	if bp == nil {
-		return b == nil || b.Size() == 0
-	}
-	if b == nil {
-		return bp.Size() == 0
-	}
-	if b.Size() != bp.Size() {
-		return false
-	}
-
 	equal := true
+
 	b.Iterate(func(k, v Term) bool {
 		if vp, ok := bp.Get(k); ok {
 			if !v.Equal(vp) {
 				equal = false
+
 				return false
 			}
 		} else {
 			equal = false
+
 			return false
 		}
+
 		return true
 	})
 
