@@ -160,12 +160,17 @@ func (f *Fact) Subst(b *term.Binding) *Fact {
 }
 
 func (f *Fact) Vars() []*term.Variable {
-	var vars []*term.Variable
-
+	total := 0
 	for _, a := range f.Args {
-		vars = append(vars, term.Vars(a)...)
+		total += term.VarCount(a)
 	}
-
+	if total == 0 {
+		return nil
+	}
+	vars := make([]*term.Variable, 0, total)
+	for _, a := range f.Args {
+		vars = term.AppendVars(vars, a)
+	}
 	return vars
 }
 
@@ -214,12 +219,21 @@ func (f Facts) Swap(i, j int) {
 }
 
 func (f Facts) Vars() []*term.Variable {
-	var vars []*term.Variable
-
+	total := 0
 	for _, fact := range f {
-		vars = append(vars, fact.Vars()...)
+		for _, arg := range fact.Args {
+			total += term.VarCount(arg)
+		}
 	}
-
+	if total == 0 {
+		return nil
+	}
+	vars := make([]*term.Variable, 0, total)
+	for _, fact := range f {
+		for _, arg := range fact.Args {
+			vars = term.AppendVars(vars, arg)
+		}
+	}
 	return vars
 }
 

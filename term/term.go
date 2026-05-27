@@ -520,25 +520,84 @@ type WeakTerm struct {
 	Args  []WeakTerm `json:"args,omitempty"`
 }
 
-func Vars(t Term) []*Variable {
-	var vars []*Variable
+// VarCount returns the number of variables contained in t.
+// Cheaper than len(Vars(t)) because it avoids allocating the slice.
+func VarCount(t Term) int {
+	return countVars(t)
+}
 
+// AppendVars appends the variables found in t to vars and returns the
+// resulting slice. Useful when collecting variables from several terms
+// into a single pre-sized slice.
+func AppendVars(vars []*Variable, t Term) []*Variable {
+	return appendVars(vars, t)
+}
+
+func countVars(t Term) int {
+	if t == nil {
+		return 0
+	}
 	switch t.GetType() {
 	case FunctionType:
-		t := Must(AsFunction(t))
-		for _, arg := range t.Args {
-			vars = append(vars, Vars(arg)...)
+		f := Must(AsFunction(t))
+		total := 0
+		for _, arg := range f.Args {
+			total += countVars(arg)
+		}
+		return total
+	case VariableType:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func appendVars(vars []*Variable, t Term) []*Variable {
+	if t == nil {
+		return vars
+	}
+	switch t.GetType() {
+	case FunctionType:
+		f := Must(AsFunction(t))
+		for _, arg := range f.Args {
+			vars = appendVars(vars, arg)
 		}
 	case VariableType:
-		v := Must(AsVariable(t))
-		vars = append(vars, v)
+		vars = append(vars, Must(AsVariable(t)))
 	}
-
 	return vars
 }
 
+// Vars returns the variables contained in t. The result slice is
+// pre-sized via VarCount so the recursive walk does not reallocate.
+func Vars(t Term) []*Variable {
+	count := countVars(t)
+	if count == 0 {
+		return nil
+	}
+	vars := make([]*Variable, 0, count)
+	return appendVars(vars, t)
+}
+
+// occurs reports whether v appears in t. Used by the unification
+// occurs-check; short-circuits without allocating, unlike
+// slices.Contains(Vars(t), v).
+func occurs(v *Variable, t Term) bool {
+	switch n := t.(type) {
+	case *Variable:
+		return v == n
+	case *Function:
+		for _, arg := range n.Args {
+			if occurs(v, arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func IsGround(t Term) bool {
-	return len(Vars(t)) == 0
+	return VarCount(t) == 0
 }
 
 // Substitute variable x in g with t.
@@ -570,8 +629,25 @@ func Subst(x Variable, t, g Term) Term {
 	return g
 }
 
-// Apply binding b to term g.
+// Apply binding b to term g. When every key in b is a Variable (the
+// common case), uses a single recursive walk that replaces variables
+// from a map lookup and returns the original subtree unchanged when
+// no replacements fire. Otherwise falls back to the generic
+// per-binding Replace loop.
+//
+// The fast path does not follow chains: for b = {x->y, y->1} and g = x,
+// the result is y, not 1. Callers that need chained resolution should
+// call b.ComputeFixpoint() before SubstBinding. The fallback path is
+// also chain-blind in the sense that it depends on map iteration order,
+// so its old behaviour on chained bindings was non-deterministic.
 func SubstBinding(b *Binding, g Term) Term {
+	if b == nil || b.Empty() {
+		return g
+	}
+	if bindingAllVariables(b) {
+		return substVars(b, g)
+	}
+
 	next := g
 
 	b.Iterate(func(x, t Term) bool {
@@ -581,6 +657,55 @@ func SubstBinding(b *Binding, g Term) Term {
 	})
 
 	return next
+}
+
+// substVars is the fast path for SubstBinding when every key in b is a
+// Variable: a single recursive walk that returns the original Function
+// subtree when none of its args changed.
+func substVars(b *Binding, g Term) Term {
+	switch t := g.(type) {
+	case *Variable:
+		if v, ok := b.Get(t); ok {
+			return v
+		}
+		return t
+	case *Function:
+		var modified bool
+		var args []Term
+
+		for i, arg := range t.Args {
+			sub := substVars(b, arg)
+			if sub == arg {
+				continue
+			}
+			if !modified {
+				args = make([]Term, len(t.Args))
+				copy(args, t.Args)
+				modified = true
+			}
+			args[i] = sub
+		}
+
+		if !modified {
+			return t
+		}
+
+		return NewFunction(t.Name, args)
+	default:
+		return g
+	}
+}
+
+func bindingAllVariables(b *Binding) bool {
+	all := true
+	b.Iterate(func(k, _ Term) bool {
+		if _, ok := k.(*Variable); !ok {
+			all = false
+			return false
+		}
+		return true
+	})
+	return all
 }
 
 func (c *Constant[T]) Unify(t Term) (*Binding, error) {
@@ -743,7 +868,7 @@ func unify(a1, a2 Term, b *Binding) error {
 	case t1Type == VariableType:
 		v := Must(AsVariable(a1))
 
-		if slices.Contains(Vars(a2), v) {
+		if occurs(v, a2) {
 			// return &UnificationError{a1, a2, "occurs check failed"}
 			return ErrOccursCheckFailed
 		}
