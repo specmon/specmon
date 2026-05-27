@@ -23,13 +23,6 @@ import (
 	"strings"
 )
 
-// HashSet embeds HashMap by value. Method calls on HashSet receive a
-// HashSet value, so writes through h.m.Set/Remove operate on a copy of
-// the embedded HashMap struct — but the underlying `m` map field is a
-// reference type, so map mutations propagate to the original. Any
-// future addition of a non-reference field to HashMap (an int counter,
-// a fixed-size buffer, etc.) would silently break HashSet writes.
-// If such a field is needed, change the embedding to *HashMap.
 type HashSet[T any] struct {
 	m HashMap[T, struct{}]
 }
@@ -75,20 +68,21 @@ func (h HashSet[T]) Values() []T {
 func (h HashSet[T]) String() string {
 	s := "HashSet["
 
-	h.m.Iterate(func(k T, _ struct{}) bool {
-		s += fmt.Sprintf("%v", k)
+	for _, entry := range h.m.m {
+		s += fmt.Sprintf("%v", entry.Key)
 		s += " "
-		return true
-	})
+	}
 	s = strings.TrimSuffix(s, " ")
 
 	return s + "]"
 }
 
 func (h HashSet[T]) Iterate(f func(T) bool) {
-	h.m.Iterate(func(k T, _ struct{}) bool {
-		return f(k)
-	})
+	for _, entry := range h.m.m {
+		if !f(entry.Key) {
+			break
+		}
+	}
 }
 
 func (h HashSet[T]) Union(h1 *HashSet[T]) *HashSet[T] {
