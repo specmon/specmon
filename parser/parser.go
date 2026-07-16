@@ -505,7 +505,8 @@ func (p *Parser) parsePubName(n *sitter.Node) term.Term {
 	if strings.HasPrefix(name, "0x") {
 		bytes, err := hex.DecodeString(name[2:])
 		if err != nil {
-			panic("invalid hex string")
+			errMsg := fmt.Sprintf("attempt to parse invalid hex string: %s. Does it have even length?\n", name)
+			panic(errMsg)
 		}
 
 		return term.NewConstant[[]byte](bytes)

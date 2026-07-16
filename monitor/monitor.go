@@ -60,6 +60,10 @@ type Unifier[T any] interface {
 	Subst(b *term.Binding) T
 }
 
+type Settings struct {
+	TruncateArgs int64
+}
+
 // Monitor is a monitor that processes events according to a set of rules.
 type Monitor struct {
 	// rules is the set of rules that the monitor uses.
@@ -71,9 +75,12 @@ type Monitor struct {
 
 	// stats includes the statistics of the monitor.
 	stats *Stats
+
+	// settings hold user configurations to alter monitor behavior
+	settings *Settings
 }
 
-func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
+func NewMonitor(rules []*rule.Rule, settings *Settings) (*Monitor, error) {
 	if err := checkWellformedness(rules); err != nil {
 		return nil, err
 	}
@@ -92,10 +99,16 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 	}
 
 	return &Monitor{
-		rules:   rulesMap,
-		configs: data.NewHashSet(NewConfig()),
-		stats:   &Stats{},
+		rules:    rulesMap,
+		configs:  data.NewHashSet(NewConfig()),
+		stats:    &Stats{},
+		settings: settings,
 	}, nil
+}
+
+// Settings returns the configurations of the monitor.
+func (m *Monitor) Settings() *Settings {
+	return m.settings
 }
 
 // Configs returns the configurations of the monitor.
@@ -689,7 +702,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
 					for _, f := range c.facts {
-						log.Warnf("  %s\n", f.Name)
+						f.LogArgs(m.Settings().TruncateArgs)
 					}
 				}
 
@@ -721,9 +734,12 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 		}
 
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
+		counter := 0
 		for _, c := range m.configs.Values() {
+			counter++
+			log.Warnf("Configuration %d\n", counter)
 			for _, f := range c.facts {
-				log.Warnf("  %s\n", f.Name)
+				f.LogArgs(m.Settings().TruncateArgs)
 			}
 		}
 	}()

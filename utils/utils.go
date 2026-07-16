@@ -170,3 +170,12 @@ func MedianDuration(numbers []time.Duration) float64 {
 
 	return float64(numbers[middle])
 }
+
+// TruncateString shortens a string to maxLen and appends '...' if the string was truncated.
+func TruncateString(s string, maxLen int64) string {
+	length := int64(len(s))
+	if length > maxLen {
+		return s[:maxLen] + "..." + fmt.Sprintf("{%d}", length)
+	}
+	return s
+}
