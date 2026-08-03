@@ -25,10 +25,30 @@ import (
 	"strings"
 
 	"github.com/specmon/specmon/data"
+	"github.com/specmon/specmon/utils"
 )
 
 type Binding struct {
 	m *data.HashMap[Term, Term]
+}
+
+// BindingTrail records inverse Set/Remove operations so a sequence of
+// in-place updates to a Binding can be undone in one call. It enables
+// backtracking DFS over a single mutable binding instead of cloning
+// the binding at every branch.
+type BindingTrail struct {
+	entries []bindingTrailEntry
+}
+
+type bindingTrailEntry struct {
+	key     Term
+	old     Term
+	existed bool
+}
+
+// NewBindingTrail returns an empty trail.
+func NewBindingTrail() *BindingTrail {
+	return &BindingTrail{}
 }
 
 func NewBinding() *Binding {
@@ -179,4 +199,90 @@ func (b *Binding) Clone() *Binding {
 
 func (b *Binding) Extend(bp *Binding) *Binding {
 	return &Binding{b.m.Extend(bp.m)}
+}
+
+// HashUnordered returns an order-independent hash of (k, v) pairs using XOR.
+// Use for deduplication where collisions are handled by Equal().
+// Cheaper than Hash() because it does not iterate sorted.
+func (b *Binding) HashUnordered() uint64 {
+	if b == nil || b.Empty() {
+		return 0
+	}
+	var h uint64
+	b.Iterate(func(k, v Term) bool {
+		// Mix key and value hashes, then XOR into the accumulator.
+		pair := utils.FNV64aUint64(k.Hash(), v.Hash())
+		h ^= pair
+		return true
+	})
+	return h
+}
+
+// Mark returns the current trail length so callers can Unwind back to this point.
+func (t *BindingTrail) Mark() int {
+	if t == nil {
+		return 0
+	}
+	return len(t.entries)
+}
+
+// SetWithTrail records the previous value (if any) at k before setting it to v.
+// When v equals the existing value the binding is left untouched and no trail
+// entry is appended.
+func (b *Binding) SetWithTrail(k, v Term, trail *BindingTrail) {
+	if trail == nil {
+		b.Set(k, v)
+		return
+	}
+	if old, ok := b.Get(k); ok {
+		if !old.Equal(v) {
+			trail.entries = append(trail.entries, bindingTrailEntry{
+				key:     k,
+				old:     old,
+				existed: true,
+			})
+			b.Set(k, v)
+		}
+		return
+	}
+	trail.entries = append(trail.entries, bindingTrailEntry{
+		key:     k,
+		existed: false,
+	})
+	b.Set(k, v)
+}
+
+// MergeWithTrail sets keys from other that are not already present in b, each
+// recorded on the trail so Unwind can restore the pre-merge state.
+func (b *Binding) MergeWithTrail(other *Binding, trail *BindingTrail) {
+	if other == nil || other.Empty() {
+		return
+	}
+	other.Iterate(func(k, v Term) bool {
+		if _, ok := b.Get(k); ok {
+			return true
+		}
+		b.SetWithTrail(k, v, trail)
+		return true
+	})
+}
+
+// Unwind rolls back trail entries after mark, restoring the binding to its
+// state at the matching Mark() call.
+func (b *Binding) Unwind(trail *BindingTrail, mark int) {
+	if trail == nil {
+		return
+	}
+	if mark < 0 || mark > len(trail.entries) {
+		mark = 0
+	}
+	for i := len(trail.entries) - 1; i >= mark; i-- {
+		entry := trail.entries[i]
+		if entry.existed {
+			b.Set(entry.key, entry.old)
+			continue
+		}
+		b.Remove(entry.key)
+	}
+	trail.entries = trail.entries[:mark]
 }

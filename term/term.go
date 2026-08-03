@@ -129,9 +129,29 @@ type Function struct {
 	Args []Term `json:"args"`
 }
 
+// evaluatableFunctions contains function names that Evaluate() can reduce to constants.
+var evaluatableFunctions = map[string]bool{
+	CatFunctionName:   true,
+	AddFunctionName:   true,
+	AndFunctionName:   true,
+	OrFunctionName:    true,
+	SliceFunctionName: true,
+	ReverseFuncName:   true,
+}
+
 func (c *Constant[T]) GetType() string { return c.Type }
 func (v *Variable) GetType() string    { return v.Type }
 func (f *Function) GetType() string    { return f.Type }
+
+// MayEvalToConstant returns true if this function could potentially
+// evaluate to a constant value via Evaluate().
+// Returns false for unknown functions since Evaluate() doesn't reduce them.
+func (f *Function) MayEvalToConstant() bool {
+	if f == nil {
+		return false
+	}
+	return evaluatableFunctions[f.Name]
+}
 
 func NewConstant[T ConstantConstraint](value T) *Constant[T] {
 	return &Constant[T]{
