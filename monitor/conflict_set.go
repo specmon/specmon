@@ -288,7 +288,7 @@ func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, nam
 	return result
 }
 
-func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term) *bindingSet {
+func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term, hash func(T) uint64, equal func(a, b T) bool) *bindingSet {
 	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
 	if len(body) == 1 {
@@ -301,9 +301,83 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 	}
 	needsByKey, needAllIndices := collectIndexNeeds(body, indexable, name, constraintsByBody)
 
-	// Index items by name+arity and per-argument constants.
+	// Count how many body slots reference each (name, arity) key. The DFS
+	// can never consume more instances of a key than there are body slots
+	// requesting it, so any multiset multiplicity beyond that count is
+	// wasted iteration. We cap each duplicate group at min(count, slots).
+	bodySlotCount := make(map[conflictKey]int, len(needsByKey))
+	for i, p := range body {
+		if !indexable(p) {
+			continue
+		}
+		k := conflictKey{name: name(p), arity: constraintsByBody[i].arity}
+		bodySlotCount[k]++
+	}
+
+	// Build a virtual items slice that drops duplicate instances beyond the
+	// body slot cap for their (name, arity) key. Items that aren't
+	// indexable, or whose key isn't referenced by any body pattern, pass
+	// through unchanged so the !indexable(p) fallback path still works.
+	var virtualItems []T
+	if hash != nil && equal != nil {
+		virtualItems = make([]T, 0, len(items))
+		// seenByKey: per (name, arity) key, hash -> list of virtual indices
+		// for the unique items already admitted under this key. New items
+		// hash-match against this; equal-match decides duplicate.
+		seenByKey := make(map[conflictKey]map[uint64][]int)
+		// dupCount[vIdx]: how many copies of the unique fact first seen at
+		// vIdx have been admitted so far. Capped at bodySlotCount[key].
+		dupCount := make(map[int]int)
+
+		for _, item := range items {
+			if !indexable(item) {
+				virtualItems = append(virtualItems, item)
+				continue
+			}
+			key := conflictKey{name: name(item), arity: len(args(item))}
+			slotCap := bodySlotCount[key]
+			if slotCap == 0 {
+				// No body slot consumes this key. Pass through so the
+				// needAllIndices fallback can still see it.
+				virtualItems = append(virtualItems, item)
+				continue
+			}
+			h := hash(item)
+			bucketSeen := seenByKey[key]
+			if bucketSeen == nil {
+				bucketSeen = make(map[uint64][]int)
+				seenByKey[key] = bucketSeen
+			}
+			// Check whether this item duplicates an already-admitted unique.
+			matched := -1
+			for _, vIdx := range bucketSeen[h] {
+				if equal(virtualItems[vIdx], item) {
+					matched = vIdx
+					break
+				}
+			}
+			if matched >= 0 {
+				if dupCount[matched] >= slotCap {
+					// Already at slot cap: drop further copies.
+					continue
+				}
+				dupCount[matched]++
+				virtualItems = append(virtualItems, item)
+				continue
+			}
+			// New unique fact.
+			vNew := len(virtualItems)
+			virtualItems = append(virtualItems, item)
+			bucketSeen[h] = append(bucketSeen[h], vNew)
+			dupCount[vNew] = 1
+		}
+	} else {
+		virtualItems = items
+	}
+
+	// Index virtual items by name+arity and per-argument constants.
 	itemsByKey := make(map[conflictKey]*itemBucket, len(needsByKey))
-	for i, item := range items {
+	for i, item := range virtualItems {
 		if !indexable(item) {
 			continue
 		}
@@ -341,8 +415,8 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 				posMap = make(map[uint64][]int)
 				bucket.constIndex[pos] = posMap
 			}
-			hash := arg.Hash()
-			posMap[hash] = append(posMap[hash], i)
+			h := arg.Hash()
+			posMap[h] = append(posMap[h], i)
 		}
 	}
 
@@ -353,8 +427,8 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	var allIndices []int
 	if needAllIndices {
-		allIndices = make([]int, len(items))
-		for j := range items {
+		allIndices = make([]int, len(virtualItems))
+		for j := range virtualItems {
 			allIndices[j] = j
 		}
 	}
@@ -390,7 +464,7 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 		filtered := make([]int, 0, len(candIndices))
 		for _, idx := range candIndices {
-			fArgs := args(items[idx])
+			fArgs := args(virtualItems[idx])
 			if constraints.matchesArgs(fArgs) {
 				filtered = append(filtered, idx)
 			}
@@ -404,11 +478,12 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	result := newBindingSet()
 
-	// Track which items from the original items slice have been used.
-	// This ensures multiset semantics s.t. each fact can only be consumed once.
+	// Track which virtual items have been used in the current DFS path.
+	// This ensures multiset semantics s.t. each (possibly deduped+capped)
+	// virtual instance can only be consumed once per binding path.
 	// Use a binding trail (mark/unwind) so the DFS reuses one mutable binding
 	// instead of cloning at every branch.
-	usedItems := make([]bool, len(items))
+	usedItems := make([]bool, len(virtualItems))
 	trail := term.NewBindingTrail()
 
 	var dfs func(pos int, b *term.Binding)
@@ -425,12 +500,12 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 		psArgs := args(ps)
 
 		for _, itemIdx := range prefilter[idx] {
-			// Skip if this fact has already been used in this binding path
+			// Skip if this virtual item has already been used in this binding path
 			if usedItems[itemIdx] {
 				continue
 			}
 
-			f := items[itemIdx]
+			f := virtualItems[itemIdx]
 			fArgs := args(f)
 			if len(psArgs) == len(fArgs) {
 				skip := false
@@ -464,17 +539,23 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 }
 
 // conflictSetFacts matches a sequence of fact patterns against a multiset of facts.
-// It builds a per-predicate local index and uses DFS with early filtering by constants.
+// It builds a per-predicate local index, deduplicates identical facts up to the
+// per-predicate body slot count, and uses DFS with early filtering by constants.
 func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
 	return conflictSet(facts, body,
 		func(_ *rule.Fact) bool { return true },
 		func(f *rule.Fact) string { return f.Name },
 		func(f *rule.Fact) []term.Term { return f.Args },
+		func(f *rule.Fact) uint64 { return f.Hash() },
+		func(a, b *rule.Fact) bool { return a.Equal(b) },
 	)
 }
 
 // conflictSetTerms matches a sequence of term patterns against a set of seen terms.
 // It builds a local index by function name and orders patterns by selectivity.
+// Seen terms are not deduplicated (passed nil hash/equal): the seen set is
+// already kept distinct upstream, so capping by body slot count would only
+// add overhead without removing any iteration.
 func conflictSetTerms(seen []term.Term, body []term.Term) *bindingSet {
 	return conflictSet(seen, body,
 		func(t term.Term) bool {
@@ -495,6 +576,8 @@ func conflictSetTerms(seen []term.Term, body []term.Term) *bindingSet {
 			}
 			return nil
 		},
+		nil,
+		nil,
 	)
 }
 
