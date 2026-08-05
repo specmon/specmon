@@ -321,13 +321,17 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 	var virtualItems []T
 	if hash != nil && equal != nil {
 		virtualItems = make([]T, 0, len(items))
-		// seenByKey: per (name, arity) key, hash -> list of virtual indices
-		// for the unique items already admitted under this key. New items
-		// hash-match against this; equal-match decides duplicate.
-		seenByKey := make(map[conflictKey]map[uint64][]int)
-		// dupCount[vIdx]: how many copies of the unique fact first seen at
-		// vIdx have been admitted so far. Capped at bodySlotCount[key].
-		dupCount := make(map[int]int)
+		// firstByKey[key][hash] is the virtual index of the FIRST item we
+		// admitted at that (key, hash). In the common case (no hash
+		// collisions across distinct items) this is the only structure
+		// we need. dupCount[vIdx] tracks how many copies of the unique
+		// fact first seen at vIdx have been admitted so far. extraByKey
+		// only allocates when a hash already has a non-equal item, to
+		// hold the additional virtual indices for distinct-but-colliding
+		// items.
+		firstByKey := make(map[conflictKey]map[uint64]int)
+		var dupCount map[int]int                        // lazy: most slotCaps are 1
+		var extraByKey map[conflictKey]map[uint64][]int // lazy: rare collisions
 
 		for _, item := range items {
 			if !indexable(item) {
@@ -337,39 +341,75 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 			key := conflictKey{name: name(item), arity: len(args(item))}
 			slotCap := bodySlotCount[key]
 			if slotCap == 0 {
-				// No body slot consumes this key. Pass through so the
-				// needAllIndices fallback can still see it.
+				// No body slot consumes this key.
 				virtualItems = append(virtualItems, item)
 				continue
 			}
 			h := hash(item)
-			bucketSeen := seenByKey[key]
-			if bucketSeen == nil {
-				bucketSeen = make(map[uint64][]int)
-				seenByKey[key] = bucketSeen
+			byHash := firstByKey[key]
+			if byHash == nil {
+				byHash = make(map[uint64]int)
+				firstByKey[key] = byHash
 			}
-			// Check whether this item duplicates an already-admitted unique.
+			firstIdx, hashSeen := byHash[h]
+			if !hashSeen {
+				// First time we see this hash at this key. Admit.
+				byHash[h] = len(virtualItems)
+				virtualItems = append(virtualItems, item)
+				continue
+			}
+			// Check whether this item duplicates the first one at this hash.
+			if equal(virtualItems[firstIdx], item) {
+				if dupCount == nil {
+					dupCount = make(map[int]int)
+				}
+				c := dupCount[firstIdx]
+				if c == 0 {
+					c = 1 // implicit count for the first admission
+				}
+				if c >= slotCap {
+					continue // at cap, drop
+				}
+				dupCount[firstIdx] = c + 1
+				virtualItems = append(virtualItems, item)
+				continue
+			}
+			// Hash collision with a different item. Check extraByKey
+			// for prior collisions; admit if none match.
+			if extraByKey == nil {
+				extraByKey = make(map[conflictKey]map[uint64][]int)
+			}
+			extras := extraByKey[key]
+			if extras == nil {
+				extras = make(map[uint64][]int)
+				extraByKey[key] = extras
+			}
 			matched := -1
-			for _, vIdx := range bucketSeen[h] {
+			for _, vIdx := range extras[h] {
 				if equal(virtualItems[vIdx], item) {
 					matched = vIdx
 					break
 				}
 			}
 			if matched >= 0 {
-				if dupCount[matched] >= slotCap {
-					// Already at slot cap: drop further copies.
+				if dupCount == nil {
+					dupCount = make(map[int]int)
+				}
+				c := dupCount[matched]
+				if c == 0 {
+					c = 1
+				}
+				if c >= slotCap {
 					continue
 				}
-				dupCount[matched]++
+				dupCount[matched] = c + 1
 				virtualItems = append(virtualItems, item)
 				continue
 			}
-			// New unique fact.
+			// Genuinely new collision-distinct item. Record and admit.
 			vNew := len(virtualItems)
+			extras[h] = append(extras[h], vNew)
 			virtualItems = append(virtualItems, item)
-			bucketSeen[h] = append(bucketSeen[h], vNew)
-			dupCount[vNew] = 1
 		}
 	} else {
 		virtualItems = items
@@ -549,6 +589,28 @@ func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
 		func(f *rule.Fact) uint64 { return f.Hash() },
 		func(a, b *rule.Fact) bool { return a.Equal(b) },
 	)
+}
+
+// conflictSetFactsForConfig is like conflictSetFacts but draws candidates
+// from c.factsByName. It builds the items slice from only the predicate
+// buckets a body pattern references, skipping facts whose predicate the
+// rule's LHS never mentions. For configs with thousands of unrelated
+// facts this keeps the conflict-set pre-pass O(|interesting facts|)
+// instead of O(|all facts|).
+func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
+	// Collect the distinct predicate names referenced by body patterns.
+	// Most rules have only a handful, so a small set suffices.
+	seen := make(map[string]struct{}, len(body))
+	var items []*rule.Fact
+	for _, p := range body {
+		name := p.Name
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		items = append(items, c.factsByName[name]...)
+	}
+	return conflictSetFacts(items, body)
 }
 
 // conflictSetTerms matches a sequence of term patterns against a set of seen terms.

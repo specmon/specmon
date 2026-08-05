@@ -59,17 +59,94 @@ type Unifier[T any] interface {
 	Subst(b *term.Binding) T
 }
 
+// ruleKey identifies the predicate-name + arity an event term carries.
+// Splitting trigger and hint rule dispatch by (name, arity) lets us skip
+// the HasTriggers/HasHints filter in the hot loop and avoids visiting
+// rules that pattern-match the same name with a different arity.
+type ruleKey struct {
+	name  string
+	arity int
+}
+
 // Monitor is a monitor that processes events according to a set of rules.
 type Monitor struct {
-	// rules is the set of rules that the monitor uses.
-	// It is indexed by the rules' hints and triggers.
-	rules map[string][]*rule.Rule
+	// triggerRules maps event (name, arity) to rules whose triggers
+	// contain a term with that signature. Pre-filtered so hot-loop
+	// callers don't repeat HasTriggers().
+	triggerRules map[ruleKey][]*rule.Rule
+
+	// hintRules maps event (name, arity) to rules whose hints contain a
+	// term with that signature. Pre-filtered so hot-loop callers don't
+	// repeat HasHints().
+	hintRules map[ruleKey][]*rule.Rule
+
+	// epsilonRules are rules without triggers or hints, applied
+	// directly to the configuration.
+	epsilonRules []*rule.Rule
+
+	// requirements maps each rule to the per-predicate name -> count its
+	// LHS demands. The rule-applicability gate consults this to short-
+	// circuit conflictSetFacts when a config can't possibly satisfy the
+	// rule's LHS.
+	requirements map[*rule.Rule]map[string]int
 
 	// configs is the set of configurations that the monitor has.
+	//
+	// Dedup semantics: data.HashSet keys solely by Config.Hash() with
+	// no Equal fallback (data/hashmap.go), so two configurations that
+	// happen to collide on Hash() will silently merge here. The
+	// monitor relies on Config.Hash being multiplicity-preserving
+	// (sum-based with splitmix64 mixing, see configuration.go) so
+	// trivially-distinct configurations (e.g. differing only in fact
+	// multiplicity) cannot collide by construction. For all measured
+	// workloads (signal-large, wireguard) the empirical genuine-
+	// collision rate is zero.
+	//
+	// This is a workload-level guarantee, not a structural one. A
+	// container adding Config.Equal-based collision safety on top of
+	// hash bucketing was evaluated, but the resulting 30-100%
+	// wall-time regression on signal-large was unacceptable for a
+	// property that never fired on the measured workloads. If either
+	// (a) a future workload exhibits hash collisions or (b) future
+	// infrastructure (term interning, fact pools) reduces the
+	// per-Equal cost to neutral, revisit an Equal-checking container.
 	configs *data.HashSet[*Config]
 
 	// stats includes the statistics of the monitor.
 	stats *Stats
+}
+
+// computeRequirements returns the per-predicate-name count of facts the
+// rule's LHS demands. A rule whose LHS asks for two instances of
+// State() and one of Out() has needCount{"State": 2, "Out": 1}.
+func computeRequirements(lhs []*rule.Fact) map[string]int {
+	if len(lhs) == 0 {
+		return nil
+	}
+	needCount := make(map[string]int, len(lhs))
+	for _, f := range lhs {
+		if f == nil {
+			continue
+		}
+		needCount[f.Name]++
+	}
+	return needCount
+}
+
+// canMatchLHS reports whether c could possibly satisfy r's LHS. False
+// means the conflictSetFacts call for (c, r) can be skipped entirely.
+// True is necessary but not sufficient: the binding/unification work
+// happens later.
+func canMatchLHS(c *Config, needCount map[string]int) bool {
+	if len(needCount) == 0 {
+		return true
+	}
+	for name, need := range needCount {
+		if c.CountByName(name) < need {
+			return false
+		}
+	}
+	return true
 }
 
 func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
@@ -77,23 +154,59 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 		return nil, err
 	}
 
-	rulesMap := make(map[string][]*rule.Rule)
-	for _, r := range rules {
-		if !r.HasHints() && !r.HasTriggers() {
-			rulesMap[""] = append(rulesMap[""], r)
+	triggerRules := make(map[ruleKey][]*rule.Rule)
+	hintRules := make(map[ruleKey][]*rule.Rule)
+	var epsilonRules []*rule.Rule
+	requirements := make(map[*rule.Rule]map[string]int, len(rules))
 
+	for _, r := range rules {
+		requirements[r] = computeRequirements(r.LHS)
+
+		hasTriggers := r.HasTriggers()
+		hasHints := r.HasHints()
+
+		if !hasTriggers && !hasHints {
+			epsilonRules = append(epsilonRules, r)
 			continue
 		}
 
-		for _, t := range append(r.Hints(), r.Triggers()...) {
-			rulesMap[splitPairFirstName(t)] = append(rulesMap[splitPairFirstName(t)], r)
+		// A rule may carry several triggers (or hints) with the same
+		// (name, arity) signature. Register it once per key: a single
+		// handleTriggers/handleHints invocation already considers every
+		// trigger/hint term of the rule, so a duplicate registration
+		// would repeat the identical applications and emit their
+		// actions twice.
+		if hasTriggers {
+			seenKeys := make(map[ruleKey]struct{}, len(r.Triggers()))
+			for _, t := range r.Triggers() {
+				k := ruleKeyForTerm(t)
+				if _, ok := seenKeys[k]; ok {
+					continue
+				}
+				seenKeys[k] = struct{}{}
+				triggerRules[k] = append(triggerRules[k], r)
+			}
+		}
+		if hasHints {
+			seenKeys := make(map[ruleKey]struct{}, len(r.Hints()))
+			for _, t := range r.Hints() {
+				k := ruleKeyForTerm(t)
+				if _, ok := seenKeys[k]; ok {
+					continue
+				}
+				seenKeys[k] = struct{}{}
+				hintRules[k] = append(hintRules[k], r)
+			}
 		}
 	}
 
 	return &Monitor{
-		rules:   rulesMap,
-		configs: data.NewHashSet(NewConfig()),
-		stats:   &Stats{},
+		triggerRules: triggerRules,
+		hintRules:    hintRules,
+		epsilonRules: epsilonRules,
+		requirements: requirements,
+		configs:      data.NewHashSet(NewConfig()),
+		stats:        &Stats{},
 	}, nil
 }
 
@@ -107,76 +220,102 @@ func (m *Monitor) Stats() *Stats {
 	return m.stats
 }
 
+// RuleApplication records one rule firing during a ProcessEvent call:
+// the rule that ran, the binding that produced it, the resulting
+// configuration, and the action facts emitted (forwarded to the
+// rewrite output when the monitor runs in rewrite mode).
+//
+// RuleApplication has no Hash or Equal by design: applications are
+// collected as plain slices, and deduplication happens only at the
+// *Config boundary (HashSet[*Config]), where structural identity is
+// well defined. Deduplicating applications themselves would have to
+// fold every observable field (rule, binding, config, action list)
+// into a 64-bit hash with no collision fallback.
 type RuleApplication struct {
 	rule    *rule.Rule
 	binding *term.Binding
 	config  *Config
+	actions []*rule.Fact
 }
 
 // ProcessEvent consumes an event and performs the necessary monitoring actions.
-// It returns an error if there was an issue while consuming the event.
-func (m *Monitor) ProcessEvent(a term.Term) error {
+// It returns the action facts produced by each successful rule application
+// (one slice per RuleApplication) and an error if processing failed.
+func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 	log.Debugf("ProcessEvent(%s)\n", a)
 
 	updated := data.NewHashSet[*Config]()
+	var actions [][]*rule.Fact
 
-	aName := splitPairFirstName(a)
+	aKey := ruleKeyForTerm(a)
 
 	for _, c := range m.configs.Values() {
-		appliedTriggers := data.NewHashSet[RuleApplication]()
+		var appliedTriggers []RuleApplication
 
-		for _, r := range m.rules[aName] {
-			if !r.HasTriggers() {
-				continue
-			}
-
-			next, err := handleTriggers(c, a, r, m.rules)
+		for _, r := range m.triggerRules[aKey] {
+			next, err := m.handleTriggers(c, a, r)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			appliedTriggers = appliedTriggers.Union(next)
+			appliedTriggers = append(appliedTriggers, next...)
 		}
 
-		appliedHints := data.NewHashSet[RuleApplication]()
+		var appliedHints []RuleApplication
 
-		for _, r := range m.rules[aName] {
-			if !r.HasHints() {
-				continue
-			}
-
-			next, err := handleHints(c, a, r, m.rules)
+		for _, r := range m.hintRules[aKey] {
+			next, err := m.handleHints(c, a, r)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			if appliedTriggers.Empty() {
-				appliedHints = appliedHints.Union(next)
+			if len(appliedTriggers) == 0 {
+				appliedHints = append(appliedHints, next...)
 
 				continue
 			}
 
-			appliedTriggers.Iterate(func(t RuleApplication) bool {
-				next.Iterate(func(h RuleApplication) bool {
-					// If r is not a start rule of an applicable trigger
-					// or the binding of the hint rule is different from the trigger rule,
-					// then add the configuration.
+			// Replicate the original HashSet-based filter as a slice
+			// append with semantically-equivalent dedup.
+			//
+			// Original semantics: for each (t, h) pair add h iff
+			// NOT(r is a start-rule of t.rule AND t.binding == h.binding).
+			// With HashSet, repeated Adds of the same h collapsed; a
+			// single h was kept iff AT LEAST ONE t in appliedTriggers
+			// passed the predicate.
+			//
+			// Equivalently: h is suppressed iff FOR ALL t,
+			//   IsStartRuleOf(r, t.rule) AND t.binding.Equal(h.binding).
+			// We keep h otherwise. Each surviving h is appended once.
+			for _, h := range next {
+				suppress := true
+				for _, t := range appliedTriggers {
 					if !rule.IsStartRuleOf(r, t.rule) || !t.binding.Equal(h.binding) {
-						appliedHints.Add(h)
+						suppress = false
+						break
 					}
-
-					return true
-				})
-
-				return true
-			})
+				}
+				if !suppress {
+					appliedHints = append(appliedHints, h)
+				}
+			}
 		}
 
-		appliedTriggers.Union(appliedHints).Iterate(func(t RuleApplication) bool {
+		// Concatenated walk over the per-event applications. updated.Add
+		// dedups *Config structurally; actions are forwarded in order
+		// as the rewrite consumer expects.
+		for _, t := range appliedTriggers {
 			updated.Add(t.config)
-
-			return true
-		})
+			if len(t.actions) > 0 {
+				actions = append(actions, t.actions)
+			}
+		}
+		for _, t := range appliedHints {
+			updated.Add(t.config)
+			if len(t.actions) > 0 {
+				actions = append(actions, t.actions)
+			}
+		}
 	}
 
 	if updated.Size() > 1 {
@@ -192,27 +331,55 @@ func (m *Monitor) ProcessEvent(a term.Term) error {
 			}
 		}
 
-		return ErrNoApplicableRule
+		return nil, ErrNoApplicableRule
 	}
 
 	m.configs = updated
 
-	return nil
+	return actions, nil
 }
 
 // findPossibleEvents returns the events that are possible in each configuration.
 func (m *Monitor) findPossibleEvents() [][]term.Term {
 	events := make([][]term.Term, m.configs.Size())
 
+	// Collect each rule once across the three buckets (a rule may live in
+	// multiple keys of triggerRules / hintRules).
+	seen := make(map[*rule.Rule]struct{})
+	var allRules []*rule.Rule
+	for _, rs := range m.triggerRules {
+		for _, r := range rs {
+			if _, ok := seen[r]; ok {
+				continue
+			}
+			seen[r] = struct{}{}
+			allRules = append(allRules, r)
+		}
+	}
+	for _, rs := range m.hintRules {
+		for _, r := range rs {
+			if _, ok := seen[r]; ok {
+				continue
+			}
+			seen[r] = struct{}{}
+			allRules = append(allRules, r)
+		}
+	}
+	for _, r := range m.epsilonRules {
+		if _, ok := seen[r]; ok {
+			continue
+		}
+		seen[r] = struct{}{}
+		allRules = append(allRules, r)
+	}
+
 	for i, c := range m.configs.Values() {
 		var e []term.Term
-		for _, rs := range m.rules {
-			for _, r := range rs {
-				for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
-					s := r.Subst(b)
-					e = append(e, s.Hints()...)
-					e = append(e, s.Triggers()...)
-				}
+		for _, r := range allRules {
+			for _, b := range conflictSetFactsForConfig(c, r.LHS).Values() {
+				s := r.Subst(b)
+				e = append(e, s.Hints()...)
+				e = append(e, s.Triggers()...)
 			}
 		}
 
@@ -253,22 +420,48 @@ func getUniqueBinding(matches []term.Term, target term.Term) (*term.Binding, err
 	return unique, nil
 }
 
-func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.Rule) (*data.HashSet[RuleApplication], error) {
+func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleApplication, error) {
 	log.Tracef("handleTriggers(%s, %s, %s)\n\n", c, a, r.Name)
 
-	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
-		// Instantiate the triggers with the found binding.
-		// This ensures
-		//   1. The binding found is compatible with b.
-		//   2. The triggers can be evaluated and the functions they contain be evaluated.
-		instTriggers := term.Terms(r.Triggers()).Subst(b)
+	if !canMatchLHS(c, m.requirements[r]) {
+		return nil, nil
+	}
+	var C []RuleApplication
 
-		u, err := getUniqueBinding(instTriggers, a)
-		if err != nil {
-			continue
+	rawTriggers := r.Triggers()
+
+	// Try to extract a trigger binding from the event first. When this
+	// succeeds, shared variables narrow the LHS fact search from O(N)
+	// to O(1). Falls back to the original O(N) approach when the raw
+	// trigger contains format expressions with functions of unbound
+	// variables that cannot be evaluated without LHS-derived bindings.
+	triggerBinding, triggerErr := getUniqueBinding(rawTriggers, a)
+
+	var lhsPatterns []*rule.Fact
+	if triggerErr == nil {
+		lhsPatterns = make([]*rule.Fact, len(r.LHS))
+		for i, f := range r.LHS {
+			lhsPatterns[i] = f.Subst(triggerBinding)
 		}
-		bt := b.Extend(u)
+	} else {
+		lhsPatterns = r.LHS
+	}
+
+	for _, b := range conflictSetFactsForConfig(c, lhsPatterns).Values() {
+		var bt *term.Binding
+		if triggerErr == nil {
+			bt = triggerBinding.Extend(b)
+		} else {
+			// Fallback: match trigger instantiated with LHS binding.
+			instTriggers := term.Terms(rawTriggers).Subst(b)
+			u, err := getUniqueBinding(instTriggers, a)
+			if err != nil {
+				continue
+			}
+			bt = b.Extend(u)
+		}
+
+		instTriggers := term.Terms(rawTriggers).Subst(bt)
 
 		d := c.Clone()
 		d.AddSeen(a.Subst(bt))
@@ -277,7 +470,7 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 
 		if triggerBindings.Empty() {
 			log.Infof("rule %s is not applicable: missing triggers", r.Name)
-			C.Add(RuleApplication{r, bt, d})
+			C = append(C, RuleApplication{rule: r, binding: bt, config: d, actions: nil})
 
 			continue
 		}
@@ -285,17 +478,19 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 		for _, tb := range triggerBindings.Values() {
 			withTrigger := bt.Extend(tb)
 
-			if d, err := d.ApplyRule(r, withTrigger); err == nil {
+			if d2, acts, err := d.ApplyRule(r, withTrigger); err == nil {
 				log.Infof("rule %s is applicable\n  binding: %s", r.Name, withTrigger)
 
 				// Check for applicable epsilon rules.
-				// At most one may exist.
-				e, err := handleEpsilon(d, rules)
+				// At most one may exist. Epsilon actions (if any) are
+				// concatenated onto the trigger's so PPEvent rewrites
+				// emitted by epsilon rules reach the rewrite output.
+				e, epsActs, err := m.handleEpsilon(d2)
 				if err != nil {
 					return nil, err
 				}
 
-				C.Add(RuleApplication{r, withTrigger, e})
+				C = append(C, RuleApplication{rule: r, binding: withTrigger, config: e, actions: concatActions(acts, epsActs)})
 			} else if errors.Is(err, ErrRestrictionViolated) {
 				log.Infof("rule %s not applicable due to restriction: %v", r.Name, err)
 				continue
@@ -308,28 +503,47 @@ func handleTriggers(c *Config, a term.Term, r *rule.Rule, rules map[string][]*ru
 	return C, nil
 }
 
-func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.Rule) (*data.HashSet[RuleApplication], error) {
+func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleApplication, error) {
 	log.Tracef("handleHints(%s, %s, %s)\n\n", c, a, r.Name)
 
-	aName := splitPairFirstName(a)
+	if !canMatchLHS(c, m.requirements[r]) {
+		return nil, nil
+	}
+	var C []RuleApplication
 
-	C := data.NewHashSet[RuleApplication]()
-	for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
-		// Instantiate the hints with the found binding.
-		// This ensures
-		//   1. The binding found is compatible with b.
-		//   2. The hints can be evaluated and the functions they contain be evaluated.
-		instHints := term.Terms(r.Hints()).Subst(b)
+	rawHints := r.Hints()
 
-		u, err := getUniqueBinding(instHints, a)
-		if err != nil {
-			continue
+	// Mirror handleTriggers: extract hint binding from the event first
+	// to narrow the LHS fact search; fall back to the original O(N)
+	// approach when hint evaluation requires LHS-derived bindings.
+	hintBinding, hintErr := getUniqueBinding(rawHints, a)
+
+	var lhsPatterns []*rule.Fact
+	if hintErr == nil {
+		lhsPatterns = make([]*rule.Fact, len(r.LHS))
+		for i, f := range r.LHS {
+			lhsPatterns[i] = f.Subst(hintBinding)
 		}
-		hb := b.Extend(u)
+	} else {
+		lhsPatterns = r.LHS
+	}
+
+	for _, b := range conflictSetFactsForConfig(c, lhsPatterns).Values() {
+		var hb *term.Binding
+		if hintErr == nil {
+			hb = hintBinding.Extend(b)
+		} else {
+			instHints := term.Terms(rawHints).Subst(b)
+			u, err := getUniqueBinding(instHints, a)
+			if err != nil {
+				continue
+			}
+			hb = b.Extend(u)
+		}
 
 		log.Infof("hint rule %s is applicable\n  binding: %s", r.Name, hb)
 
-		d, err := c.ApplyRule(r, hb)
+		d, hintActs, err := c.ApplyRule(r, hb)
 		if err != nil {
 			if errors.Is(err, ErrRestrictionViolated) {
 				log.Infof("hint rule %s not applicable due to restriction: %v", r.Name, err)
@@ -340,62 +554,96 @@ func handleHints(c *Config, a term.Term, r *rule.Rule, rules map[string][]*rule.
 
 		// After applying the hint rule, we have to consume the event again with a trigger rule.
 		g := a.Subst(hb)
+		gKey := ruleKeyForTerm(g)
 
-		D := data.NewHashSet[RuleApplication]()
-		for _, rr := range rules[aName] {
-			// Skip rules without triggers - we only want to apply trigger rules here
-			if !rr.HasTriggers() {
-				continue
-			}
-			next, err := handleTriggers(d, g, rr, rules)
+		var D []RuleApplication
+		for _, rr := range m.triggerRules[gKey] {
+			next, err := m.handleTriggers(d, g, rr)
 			if err != nil {
 				return nil, err
 			}
-			D = D.Union(next)
+			D = append(D, next...)
 		}
 
-		if D.Size() == 0 {
+		if len(D) == 0 {
 			return nil, fmt.Errorf("no applicable rule found after accepting hint %s", g)
 		}
 
-		D.Iterate(func(t RuleApplication) bool {
-			C.Add(RuleApplication{r, hb, t.config})
-
-			return true
-		})
+		for _, t := range D {
+			// Concatenate hint actions and downstream trigger actions.
+			// concatActions allocates only when both sides are non-empty,
+			// so the common single-source case stays alloc-free and we
+			// avoid aliasing hintActs across iterations.
+			C = append(C, RuleApplication{rule: r, binding: hb, config: t.config, actions: concatActions(hintActs, t.actions)})
+		}
 	}
 
 	return C, nil
 }
 
-// handleEpsilon handles rules without triggers or hints.
-func handleEpsilon(c *Config, rules map[string][]*rule.Rule) (*Config, error) {
+// handleEpsilon handles rules without triggers or hints. At most one
+// epsilon rule may apply; if more than one matches the result is an
+// error.
+//
+// Returns (resultConfig, epsilonActions, error). epsilonActions are the
+// Act facts produced by the epsilon rule application, or nil when no
+// epsilon rule fires. Callers must concatenate these onto the actions
+// they collected from the preceding trigger/hint application so that
+// PPEvent rewrites emitted by epsilon rules are forwarded to the
+// rewrite output channel.
+func (m *Monitor) handleEpsilon(c *Config) (*Config, []*rule.Fact, error) {
 	log.Infof("\n\nhandleEpsilon()\n")
-	var C []*Config
 
-	for _, r := range rules[""] {
-		for _, b := range conflictSetFacts(c.facts, r.LHS).Values() {
+	// Track every applied (config, actions) pair so the "exactly one"
+	// invariant is enforced at the end. In the success case there is at
+	// most one entry; the slice avoids special-casing for early-exit.
+	var configs []*Config
+	var actions [][]*rule.Fact
+
+	for _, r := range m.epsilonRules {
+		if !canMatchLHS(c, m.requirements[r]) {
+			continue
+		}
+		for _, b := range conflictSetFactsForConfig(c, r.LHS).Values() {
 			log.Infof("epsilon rule %s is applicable\n  binding: %s", r.Name, b)
 
-			d, err := c.ApplyRule(r, b)
+			d, acts, err := c.ApplyRule(r, b)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 
-			C = append(C, d)
+			configs = append(configs, d)
+			actions = append(actions, acts)
 		}
 	}
 
-	if len(C) > 1 {
-		return nil, errors.New("multiple applicable epsilon rules found")
+	if len(configs) > 1 {
+		return nil, nil, errors.New("multiple applicable epsilon rules found")
 	}
 
-	// If no epsilon rule is applicable, return the original config.
-	if len(C) == 0 {
-		return c, nil
+	// If no epsilon rule is applicable, return the original config and
+	// no actions.
+	if len(configs) == 0 {
+		return c, nil, nil
 	}
 
-	return C[0], nil
+	return configs[0], actions[0], nil
+}
+
+// concatActions returns the concatenation of a and b without aliasing
+// a's backing array. Returns the non-nil slice unchanged when the
+// other is empty so the common single-source case does not allocate.
+func concatActions(a, b []*rule.Fact) []*rule.Fact {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	out := make([]*rule.Fact, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	return out
 }
 
 //
@@ -546,10 +794,11 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
 
-			if err := m.ProcessEvent(event.Event); err != nil {
+			actions, err := m.ProcessEvent(event.Event)
+			if err != nil {
 				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 				for _, c := range m.configs.Values() {
-					for _, f := range c.facts {
+					for _, f := range c.Facts() {
 						log.Warnf("  %s\n", f.Name)
 					}
 				}
@@ -563,17 +812,12 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 			m.stats.LatenciesProcessed = append(m.stats.LatenciesProcessed, time.Since(time.Unix(0, event.Time)))
 
 			if rewrite {
-				for _, c := range m.configs.Values() {
-					select {
-					case p := <-c.queue:
-						for _, f := range p {
-							if r := getRewriteTerm(f); r != nil {
-								fr := term.Must(term.AsFunction(r))
-								out <- &TimedEvent{Time: event.Time, Event: fr}
-							}
+				for _, group := range actions {
+					for _, f := range group {
+						if r := getRewriteTerm(f); r != nil {
+							fr := term.Must(term.AsFunction(r))
+							out <- &TimedEvent{Time: event.Time, Event: fr}
 						}
-					default:
-						// No output to process
 					}
 				}
 			} else {
@@ -583,7 +827,7 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 
 		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
 		for _, c := range m.configs.Values() {
-			for _, f := range c.facts {
+			for _, f := range c.Facts() {
 				log.Warnf("  %s\n", f.Name)
 			}
 		}
@@ -612,12 +856,21 @@ func checkWellformedness(rules []*rule.Rule) error {
 	return nil
 }
 
-func splitPairFirstName(t term.Term) string {
+// splitPairSignature returns the (name, arity) of the first component of
+// a hint/trigger pair. Used to bucket rules into triggerRules / hintRules
+// so dispatch is by (name, arity) rather than name only.
+func splitPairSignature(t term.Term) (string, int) {
 	fn, _ := splitPair(t)
-
 	if fn == nil {
 		log.Fatalf("unexpected hint or trigger: %s", t)
 	}
+	parsed := term.Must(term.AsFunction(fn))
+	return parsed.Name, len(parsed.Args)
+}
 
-	return term.Must(term.AsFunction(fn)).Name
+// ruleKeyForTerm returns the ruleKey of the first component of a
+// hint/trigger pair.
+func ruleKeyForTerm(t term.Term) ruleKey {
+	name, arity := splitPairSignature(t)
+	return ruleKey{name: name, arity: arity}
 }

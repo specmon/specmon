@@ -25,6 +25,7 @@ import (
 	"hash/fnv"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/specmon/specmon/term"
 )
@@ -42,6 +43,16 @@ type Fact struct {
 	Name string      `json:"name"`
 	Args []term.Term `json:"arguments"`
 	Type FactType    `json:"type"`
+
+	// hashCache memoises Hash(). 0 is the uncomputed sentinel; if the
+	// FNV-1a digest of (Name, Type, args) genuinely lands on 0 the next
+	// call re-walks and re-stores - idempotent and very rare.
+	//
+	// atomic.Uint64 is the synchronisation primitive: concurrent Hash()
+	// callers race on Load/Store but the value they compute is the same,
+	// so the last Store overwrites with an identical value. The race
+	// detector accepts atomic operations as properly synchronised.
+	hashCache atomic.Uint64
 }
 
 func NewFact(name string, args []term.Term, t FactType) *Fact {
@@ -93,7 +104,22 @@ func (f *Fact) Equal(f1 *Fact) bool {
 	return true
 }
 
+// Hash returns a 64-bit FNV-1a digest of (Name, Type, args). The result
+// is memoised in hashCache via atomic ops so concurrent callers do not
+// race on the cache slot; see the field comment for the sentinel
+// strategy.
+//
+// Unlike the term-level Hash methods (Constant, Variable, Function in
+// term/term.go) which recompute on every call to keep terms trivially
+// race-free, Fact carries an atomic cache because each Fact is hashed
+// many times per ProcessEvent: once per Config.Hash, once per
+// conflictSet bucket dedup, once per bindingSet.Add. Removing this
+// cache regresses signal-large from ~2.3s to ~17s on the 20k trace.
 func (f *Fact) Hash() uint64 {
+	if h := f.hashCache.Load(); h != 0 {
+		return h
+	}
+
 	h := fnv.New64a()
 	h.Write([]byte(f.Name))
 	h.Write([]byte(f.Type))
@@ -105,7 +131,15 @@ func (f *Fact) Hash() uint64 {
 		h.Write(buf[:])
 	}
 
-	return h.Sum64()
+	sum := h.Sum64()
+	if sum == 0 {
+		// Reserve 0 as the uncomputed sentinel; the next call will
+		// re-walk and re-store. Mathematically possible but extremely
+		// rare.
+		return 0
+	}
+	f.hashCache.Store(sum)
+	return sum
 }
 
 func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
@@ -150,13 +184,12 @@ func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
 }
 
 func (f *Fact) Subst(b *term.Binding) *Fact {
-	g := NewFact(f.Name, make([]term.Term, len(f.Args)), f.Type)
-
+	args := make([]term.Term, len(f.Args))
 	for i, a := range f.Args {
-		g.Args[i] = a.Subst(b)
+		args[i] = a.Subst(b)
 	}
 
-	return g
+	return NewFact(f.Name, args, f.Type)
 }
 
 func (f *Fact) Vars() []*term.Variable {
@@ -185,13 +218,12 @@ func (f *Fact) IsGround() bool {
 }
 
 func (f *Fact) ReplaceFormats() *Fact {
-	g := NewFact(f.Name, make([]term.Term, len(f.Args)), f.Type)
-
+	args := make([]term.Term, len(f.Args))
 	for i, a := range f.Args {
-		g.Args[i] = term.ReplaceFormats(a)
+		args[i] = term.ReplaceFormats(a)
 	}
 
-	return g
+	return NewFact(f.Name, args, f.Type)
 }
 
 func (f *Fact) HasFunctions() bool {
@@ -251,15 +283,15 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	// FIX: Make this more efficient.
 	newFacts := make([]*Fact, len(f))
 	for i, fact := range f {
-		newFact := NewFact(fact.Name, slices.Clone(fact.Args), fact.Type)
-		for j := range newFact.Args {
+		args := slices.Clone(fact.Args)
+		for j := range args {
 			b.Iterate(func(k, v term.Term) bool {
-				newFact.Args[j] = term.UnifyReplaceRecursive(newFact.Args[j], k, v)
+				args[j] = term.UnifyReplaceRecursive(args[j], k, v)
 
 				return true
 			})
 		}
-		newFacts[i] = newFact
+		newFacts[i] = NewFact(fact.Name, args, fact.Type)
 	}
 
 	return newFacts
