@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.0](https://github.com/specmon/specmon/compare/v0.2.0...v0.3.0) (2026-08-05)
+
+
+### Features
+
+* **parser:** Support boolean operators in #ifdef ([#64](https://github.com/specmon/specmon/issues/64)) ([d739f9b](https://github.com/specmon/specmon/commit/d739f9be9b18ace986af8597392b72fc15102830))
+* **rule:** Add name generator for consistent term naming ([#60](https://github.com/specmon/specmon/issues/60)) ([78d323e](https://github.com/specmon/specmon/commit/78d323e5cf4164c8cea6f3195bb92b180526b434))
+
+
+### Bug Fixes
+
+* **ci:** Setup pnpm before Node.js in docs workflow ([#67](https://github.com/specmon/specmon/issues/67)) ([1539fe8](https://github.com/specmon/specmon/commit/1539fe81aeb4835111983002671a01568fee4c62))
+* **data,term:** Handle hash collisions and make Binding.Equal symmetric ([#69](https://github.com/specmon/specmon/issues/69)) ([a25586b](https://github.com/specmon/specmon/commit/a25586b862c48c2f320ca96de6db9618afb6972e))
+
+
+### Performance Improvements
+
+* **monitor:** Index the conflict set and cap duplicate expansion ([#73](https://github.com/specmon/specmon/issues/73)) ([654d301](https://github.com/specmon/specmon/commit/654d301a99fc54dd9c7f9215855fbb552d9c4928))
+* **monitor:** Rework conflict-set matching and fact storage ([#74](https://github.com/specmon/specmon/issues/74)) ([07d6b4c](https://github.com/specmon/specmon/commit/07d6b4c5bc89f9624b88636522b0686919423b9e))
+* **term,rule:** Pre-allocate Vars and fast-path SubstBinding ([#70](https://github.com/specmon/specmon/issues/70)) ([ca4a979](https://github.com/specmon/specmon/commit/ca4a979248bd25baf96de6ede1838e1a7663c239))
+
+
+### Reverts
+
+* **data,term:** Hash collisions and symmetric Binding.Equal ([#69](https://github.com/specmon/specmon/issues/69)) ([#71](https://github.com/specmon/specmon/issues/71)) ([907b880](https://github.com/specmon/specmon/commit/907b880da5bb1bc643dcb97ad3debef46d350b3d))
+
 ## [0.2.0](https://github.com/specmon/specmon/compare/v0.1.0...v0.2.0) (2026-02-27)
 
 
