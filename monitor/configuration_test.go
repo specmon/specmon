@@ -357,3 +357,35 @@ func TestConfigStringDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyRuleEvaluatesButDoesNotStoreInternalRHSFacts(t *testing.T) {
+	addition := term.NewFunction(term.AddFunctionName, []term.Term{
+		term.NewConstant(1),
+		term.NewConstant(2),
+	})
+	r := &rule.Rule{
+		Name: "InternalRHS",
+		RHS: []*rule.Fact{
+			rule.NewFact("Public", []term.Term{addition}, rule.LinearFact),
+			rule.NewFact(rule.ComputeFactName, []term.Term{addition}, rule.LinearFact),
+			rule.NewFact("Scratch_", []term.Term{term.NewConstant("value")}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{},
+	}
+
+	result, actions, err := monitor.NewConfig().ApplyRule(r, term.NewBinding())
+	if err != nil {
+		t.Fatalf("ApplyRule: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("internal RHS facts were returned as actions: %v", actions)
+	}
+	if result.CountByName(rule.ComputeFactName) != 0 || result.CountByName("Scratch_") != 0 {
+		t.Fatalf("internal RHS facts entered the configuration: %v", result.Facts())
+	}
+
+	publicFacts := result.FactsAsSliceWithName("Public")
+	if len(publicFacts) != 1 || len(publicFacts[0].Args) != 1 || !publicFacts[0].Args[0].Equal(term.NewConstant(3)) {
+		t.Fatalf("ordinary RHS evaluation changed: %v", publicFacts)
+	}
+}

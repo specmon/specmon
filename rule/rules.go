@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -356,6 +357,60 @@ func (r Rules) FilterByRole(role string) Rules {
 	}
 
 	return rules
+}
+
+// DropUnusedRHSFacts removes RHS facts when no LHS fact has the same name and
+// arity. Top level function arguments from removed facts remain available for
+// evaluation through internal RHS facts.
+func (r Rules) DropUnusedRHSFacts() Rules {
+	if r == nil {
+		return nil
+	}
+
+	var lhs Facts
+	for _, currentRule := range r {
+		lhs = append(lhs, currentRule.LHS...)
+	}
+
+	processed := make(Rules, 0, len(r))
+	for _, currentRule := range r {
+		clone := currentRule.Clone()
+		rhs := make([]*Fact, 0, len(clone.RHS))
+		var computations []term.Term
+		hasComputation := func(candidate term.Term) bool {
+			return slices.ContainsFunc(computations, func(existing term.Term) bool {
+				return existing.Equal(candidate)
+			})
+		}
+		for _, fact := range clone.RHS {
+			if fact.Name == ComputeFactName && len(fact.Args) == 1 && !hasComputation(fact.Args[0]) {
+				computations = append(computations, fact.Args[0])
+			}
+		}
+
+		for _, fact := range clone.RHS {
+			isLive := slices.ContainsFunc(lhs, func(lhsFact *Fact) bool {
+				return lhsFact.Name == fact.Name && len(lhsFact.Args) == len(fact.Args)
+			})
+			if isLive || fact.Name == ComputeFactName {
+				rhs = append(rhs, fact)
+				continue
+			}
+
+			for _, arg := range fact.Args {
+				if arg.GetType() != term.FunctionType || hasComputation(arg) {
+					continue
+				}
+				computations = append(computations, arg)
+				rhs = append(rhs, NewFact(ComputeFactName, []term.Term{arg}, LinearFact))
+			}
+		}
+
+		clone.RHS = rhs
+		processed = append(processed, clone)
+	}
+
+	return processed
 }
 
 func (r Rules) FilterByDecomp() Rules {

@@ -417,7 +417,7 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, []*rule.Fact
 
 	// Add the facts from the RHS.
 	for _, f := range t.RHS {
-		if !strings.HasSuffix(f.Name, "_") {
+		if !rule.IsInternalFactName(f.Name) {
 			d.AddFact(f)
 		}
 	}

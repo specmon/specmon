@@ -4,7 +4,6 @@ begin
 rule TestRuleWithTrigger [ trigger=[<hash(x), hash_x>] ]:
   [ State0(m) ] 
   -->
-  [ Out(len(hash(m)))
-  , State1(m) ]
+  [ Compute_(len(hash(m))) ]
 
 end

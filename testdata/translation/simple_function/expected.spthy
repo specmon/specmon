@@ -19,7 +19,6 @@ rule TestRule_1 [ trigger=[<hash(m), h_m>] ]:
 rule TestRule_End:
   [ ST_TestRule_l_h_m(<m>, l_h_m) ]
   -->
-  [ Out(l_h_m)
-  , State1(m) ]
+  [ Compute_(l_h_m) ]
 
 end

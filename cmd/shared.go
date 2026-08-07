@@ -45,6 +45,7 @@ func ProcessRules(specPath, role string, decompose bool, defines []string) ([]*r
 	}
 
 	selectedRules := rule.Rules(rules).FilterByRole(role)
+	selectedRules = selectedRules.DropUnusedRHSFacts()
 
 	var decompRules []*rule.Rule
 	if decompose {
