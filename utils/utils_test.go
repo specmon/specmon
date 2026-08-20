@@ -1,4 +1,4 @@
-// Copyright (C) 2025 CISPA Helmholtz Center for Information Security
+// Copyright (C) 2025-2026 CISPA Helmholtz Center for Information Security
 // Author: Kevin Morio <kevin.morio@cispa.de>
 //
 // This file is part of SpecMon.
@@ -366,6 +366,16 @@ func TestPluralze(t *testing.T) {
 		output := utils.Pluralize(test.input, test.n)
 		if output != test.expected {
 			t.Errorf("Incorrect pluralization for input:\n%s\nExpected:\n%s\nGot:\n%s\n", test.input, test.expected, output)
+		}
+	}
+}
+
+func TestKillProcessRejectsUnsafePIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, pid := range []int{-2, -1, 0} {
+		if err := utils.KillProcess(pid); err == nil {
+			t.Fatalf("KillProcess(%d) returned nil", pid)
 		}
 	}
 }

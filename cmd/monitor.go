@@ -46,8 +46,9 @@ type MonitorConfig struct {
 // RunE runs the monitor subcommand.
 func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	quiet, _ := cmd.Root().Flags().GetBool("quiet")
-	if r.Pid == 0 || r.Pid < -1 {
-		return fmt.Errorf("pid must be -1 or a positive integer, got %d", r.Pid)
+	pidFlag := cmd.Flags().Lookup("pid")
+	if r.Pid < 0 || (r.Pid == 0 && pidFlag != nil && pidFlag.Changed) {
+		return fmt.Errorf("pid must be a positive integer, got %d", r.Pid)
 	}
 	terminateProcess := r.terminateProcess
 	if terminateProcess == nil {
@@ -156,7 +157,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 // NewMonitorCmd creates a new command for the monitor subcommand.
 func NewMonitorCmd() *cobra.Command {
-	monitorConfig := MonitorConfig{Pid: -1}
+	var monitorConfig MonitorConfig
 
 	cmd := &cobra.Command{
 		Use:   "monitor",

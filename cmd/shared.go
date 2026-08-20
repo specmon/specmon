@@ -95,6 +95,9 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 				// Handle []string type
 				cmd.PersistentFlags().StringSliceVarP(fieldValue.Addr().Interface().(*[]string), flag, short, nil, desc)
 			}
+		case reflect.Int:
+			value := int(fieldValue.Int())
+			cmd.PersistentFlags().IntVarP(fieldValue.Addr().Interface().(*int), flag, short, value, desc)
 		default:
 			// Ignore unsupported fields
 		}

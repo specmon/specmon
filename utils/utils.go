@@ -1,4 +1,4 @@
-// Copyright (C) 2025 CISPA Helmholtz Center for Information Security
+// Copyright (C) 2025-2026 CISPA Helmholtz Center for Information Security
 // Author: Kevin Morio <kevin.morio@cispa.de>
 //
 // This file is part of SpecMon.
@@ -143,8 +143,8 @@ func Pluralize(s string, n int) string {
 }
 
 func KillProcess(pid int) error {
-	if pid == -1 {
-		return nil
+	if pid <= 0 {
+		return fmt.Errorf("pid must be a positive integer, got %d", pid)
 	}
 
 	// Find the process by PID
