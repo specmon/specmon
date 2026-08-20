@@ -20,10 +20,12 @@ package monitor
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -180,7 +182,10 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 		if hasTriggers {
 			seenKeys := make(map[ruleKey]struct{}, len(r.Triggers()))
 			for _, t := range r.Triggers() {
-				k := ruleKeyForTerm(t)
+				k, err := ruleKeyForTerm(t)
+				if err != nil {
+					return nil, fmt.Errorf("invalid trigger in rule %s: %w", r.Name, err)
+				}
 				if _, ok := seenKeys[k]; ok {
 					continue
 				}
@@ -191,7 +196,10 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 		if hasHints {
 			seenKeys := make(map[ruleKey]struct{}, len(r.Hints()))
 			for _, t := range r.Hints() {
-				k := ruleKeyForTerm(t)
+				k, err := ruleKeyForTerm(t)
+				if err != nil {
+					return nil, fmt.Errorf("invalid hint in rule %s: %w", r.Name, err)
+				}
 				if _, ok := seenKeys[k]; ok {
 					continue
 				}
@@ -249,7 +257,10 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 	var actions [][]*rule.Fact
 	var candidateEvaluationErr error
 
-	aKey := ruleKeyForTerm(a)
+	aKey, err := ruleKeyForTerm(a)
+	if err != nil {
+		return nil, fmt.Errorf("invalid event: %w", err)
+	}
 
 	for _, c := range m.configs.Values() {
 		var appliedTriggers []RuleApplication
@@ -597,7 +608,10 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 
 		// After applying the hint rule, we have to consume the event again with a trigger rule.
 		g := a.Subst(hb)
-		gKey := ruleKeyForTerm(g)
+		gKey, err := ruleKeyForTerm(g)
+		if err != nil {
+			return nil, fmt.Errorf("invalid event after accepting hint: %w", err)
+		}
 
 		var D []RuleApplication
 		var downstreamCandidateErr error
@@ -619,7 +633,7 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 			if downstreamCandidateErr != nil {
 				return nil, downstreamCandidateErr
 			}
-			return nil, fmt.Errorf("no applicable rule found after accepting hint %s", g)
+			return nil, fmt.Errorf("%w after accepting hint %s", ErrNoApplicableRule, g)
 		}
 
 		for _, t := range D {
@@ -712,6 +726,32 @@ type TimedEvent struct {
 	Event *term.Function `json:"event"`
 }
 
+const ViolationKindNoApplicableRule = "no_applicable_rule"
+
+type ViolationInfo struct {
+	Err        error
+	ErrorKind  string
+	TimedEvent *TimedEvent
+	EventIndex int
+	Stats      StatsSummary
+}
+
+type StreamResult struct {
+	Violation *ViolationInfo
+	Err       error
+}
+
+type StatsSummary struct {
+	Received              int   `json:"received"`
+	Processed             int   `json:"processed"`
+	TotalTimeNS           int64 `json:"total_time"`
+	AvgLatencyReceivedNS  int64 `json:"avg_latency_received"`
+	AvgLatencyProcessedNS int64 `json:"avg_latency_processed"`
+	AvgProcessingTimeNS   int64 `json:"avg_processing_time"`
+	MedLatencyReceivedNS  int64 `json:"med_latency_received"`
+	MedLatencyProcessedNS int64 `json:"med_latency_processed"`
+}
+
 type Stats struct {
 	LatenciesReceived  []time.Duration
 	LatenciesProcessed []time.Duration
@@ -720,86 +760,76 @@ type Stats struct {
 }
 
 func (s *Stats) String() string {
-	var avgLatencyReceived time.Duration
-	for _, l := range s.LatenciesReceived {
-		avgLatencyReceived += l
-	}
-	if len(s.LatenciesReceived) > 0 {
-		avgLatencyReceived /= time.Duration(len(s.LatenciesReceived))
-	}
-
-	var avgLatencyProcessed time.Duration
-	for _, l := range s.LatenciesProcessed {
-		avgLatencyProcessed += l
-	}
-	if len(s.LatenciesProcessed) > 0 {
-		avgLatencyProcessed /= time.Duration(len(s.LatenciesProcessed))
-	}
-
-	var avgProcessingTime time.Duration
-	for i := range s.LatenciesReceived {
-		avgProcessingTime += s.LatenciesProcessed[i] - s.LatenciesReceived[i]
-	}
-	if len(s.LatenciesReceived) > 0 {
-		avgProcessingTime /= time.Duration(len(s.LatenciesReceived))
-	}
-
-	totalTime := s.EndTime.Sub(s.StartTime)
+	summary := s.Summary(s.EndTime)
 
 	return fmt.Sprintf("received: %d, processed: %d, total time: %s, avg latency received: %s, avg latency processed: %s, avg processing time: %s",
-		len(s.LatenciesReceived), len(s.LatenciesProcessed), totalTime, avgLatencyReceived, avgLatencyProcessed, avgProcessingTime)
+		summary.Received,
+		summary.Processed,
+		time.Duration(summary.TotalTimeNS),
+		time.Duration(summary.AvgLatencyReceivedNS),
+		time.Duration(summary.AvgLatencyProcessedNS),
+		time.Duration(summary.AvgProcessingTimeNS))
+}
+
+func (s *Stats) Summary(end time.Time) StatsSummary {
+	received := slices.Clone(s.LatenciesReceived)
+	processed := slices.Clone(s.LatenciesProcessed)
+
+	var summary StatsSummary
+	summary.Received = len(received)
+	summary.Processed = len(processed)
+	if !s.StartTime.IsZero() && !end.IsZero() {
+		summary.TotalTimeNS = end.Sub(s.StartTime).Nanoseconds()
+	}
+
+	paired := min(len(received), len(processed))
+	var processingTotal time.Duration
+	for i := 0; i < paired; i++ {
+		processingTotal += processed[i] - received[i]
+	}
+	if paired > 0 {
+		summary.AvgProcessingTimeNS = (processingTotal / time.Duration(paired)).Nanoseconds()
+	}
+
+	var receivedTotal time.Duration
+	for _, latency := range received {
+		receivedTotal += latency
+	}
+	if len(received) > 0 {
+		summary.AvgLatencyReceivedNS = (receivedTotal / time.Duration(len(received))).Nanoseconds()
+		summary.MedLatencyReceivedNS = time.Duration(utils.MedianDuration(received)).Nanoseconds()
+	}
+
+	var processedTotal time.Duration
+	for _, latency := range processed {
+		processedTotal += latency
+	}
+	if len(processed) > 0 {
+		summary.AvgLatencyProcessedNS = (processedTotal / time.Duration(len(processed))).Nanoseconds()
+		summary.MedLatencyProcessedNS = time.Duration(utils.MedianDuration(processed)).Nanoseconds()
+	}
+
+	return summary
 }
 
 func (s *Stats) JSON() string {
-	// If the monitor receives a SIGTEMR, the number of received and processed events may not match.
-	// Hence, we only consider received events that have been processed.
-	numEvents := min(len(s.LatenciesReceived), len(s.LatenciesProcessed))
-
-	var avgLatencyReceived time.Duration
-	var avgLatencyProcessed time.Duration
-	var avgProcessingTime time.Duration
-
-	for i := 0; i < numEvents; i++ {
-		avgLatencyReceived += s.LatenciesReceived[i]
-		avgLatencyProcessed += s.LatenciesProcessed[i]
-		avgProcessingTime += s.LatenciesProcessed[i] - s.LatenciesReceived[i]
-	}
-
-	if len(s.LatenciesProcessed) > 0 {
-		avgLatencyReceived /= time.Duration(numEvents)
-		avgLatencyProcessed /= time.Duration(numEvents)
-		avgProcessingTime /= time.Duration(numEvents)
-	}
-
-	totalTime := s.EndTime.Sub(s.StartTime)
-
-	stats := map[string]any{
-		"received":              len(s.LatenciesReceived),
-		"processed":             len(s.LatenciesProcessed),
-		"total_time":            totalTime.Nanoseconds(),
-		"avg_latency_received":  avgLatencyReceived.Nanoseconds(),
-		"avg_latency_processed": avgLatencyProcessed.Nanoseconds(),
-		"avg_processing_time":   avgProcessingTime.Nanoseconds(),
-		"med_latency_received":  time.Duration(utils.MedianDuration(s.LatenciesReceived)).Nanoseconds(),
-		"med_latency_processed": time.Duration(utils.MedianDuration(s.LatenciesProcessed)).Nanoseconds(),
-	}
-
-	jsonStats, err := json.Marshal(stats)
-	if err != nil {
-		panic(err)
-	}
-
+	jsonStats, _ := json.Marshal(s.Summary(s.EndTime))
 	return string(jsonStats)
 }
 
 // ParseEvents converts an io.Reader containing JSON events into a channel of TimedEvent.
 // It handles JSON parsing and filtering of comment lines.
-func ParseEvents(r io.Reader, pid int) <-chan *TimedEvent {
+func ParseEvents(ctx context.Context, r io.Reader) (<-chan *TimedEvent, <-chan error) {
 	events := make(chan *TimedEvent, outChanSize)
+	result := make(chan error, 1)
 	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
 	go func() {
-		defer close(events)
+		defer func() {
+			close(events)
+			close(result)
+		}()
 
 		for s.Scan() {
 			if strings.HasPrefix(s.Text(), "//") {
@@ -808,62 +838,98 @@ func ParseEvents(r io.Reader, pid int) <-chan *TimedEvent {
 
 			event := &TimedEvent{}
 			if err := json.Unmarshal(s.Bytes(), event); err != nil {
-				if err := utils.KillProcess(pid); err != nil {
-					log.Errorf("failed to kill process: %v", err)
-				}
-				log.Fatalf("failed to parse event: %v", err)
+				result <- fmt.Errorf("parse event: %w", err)
+				return
 			}
 
-			events <- event
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return
+			}
 		}
 
 		if err := s.Err(); err != nil {
-			if err := utils.KillProcess(pid); err != nil {
-				log.Errorf("failed to kill process: %v", err)
-			}
-			log.Fatalf("scanner error: %v", err)
+			result <- fmt.Errorf("scan events: %w", err)
+			return
 		}
+
+		result <- nil
 	}()
 
-	return events
+	return events, result
 }
 
-// ProcessEvents processes events from a channel and returns output channels.
+// EventStreams contains the asynchronous results of processing an event stream.
+type EventStreams struct {
+	Outputs  <-chan *TimedEvent
+	Consumed <-chan term.Term
+	Terminal <-chan StreamResult
+}
+
+// ProcessEvents processes events from a channel and returns its output streams.
 // This is the core processing function that handles the monitoring logic.
-func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int) (<-chan *TimedEvent, <-chan term.Term) {
+func (m *Monitor) ProcessEvents(
+	ctx context.Context,
+	events <-chan *TimedEvent,
+	rewrite bool,
+) EventStreams {
 	out := make(chan *TimedEvent, outChanSize)
 	consumed := make(chan term.Term, consumedChanSize)
+	terminal := make(chan StreamResult, 1)
 
-	m.stats.StartTime = time.Now()
+	if m.stats.StartTime.IsZero() {
+		m.stats.StartTime = time.Now()
+	}
 
 	go func() {
-		defer close(out)
-		defer close(consumed)
-		defer func() { m.stats.EndTime = time.Now() }()
+		result := StreamResult{}
+		defer func() {
+			m.stats.EndTime = time.Now()
+			m.logFinalConfigs()
+			close(out)
+			close(consumed)
+			terminal <- result
+			close(terminal)
+		}()
 
-		for event := range events {
-			if event == nil || event.Event == nil {
-				if err := utils.KillProcess(pid); err != nil {
-					log.Errorf("failed to kill process: %v", err)
+		for {
+			var event *TimedEvent
+			var ok bool
+			select {
+			case <-ctx.Done():
+				result.Err = ctx.Err()
+				return
+			case event, ok = <-events:
+				if !ok {
+					return
 				}
-				log.Fatalf("event is nil: %v", event)
+			}
+
+			if event == nil || event.Event == nil {
+				result.Err = errors.New("event or event term is nil")
+				return
 			}
 
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
 
 			actions, err := m.ProcessEvent(event.Event)
 			if err != nil {
-				log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
-				for _, c := range m.configs.Values() {
-					for _, f := range c.Facts() {
-						log.Warnf("  %s\n", f.Name)
+				if errors.Is(err, ErrNoApplicableRule) {
+					end := time.Now()
+					m.stats.EndTime = end
+					result.Violation = &ViolationInfo{
+						Err:        err,
+						ErrorKind:  ViolationKindNoApplicableRule,
+						TimedEvent: cloneTimedEvent(event),
+						EventIndex: len(m.stats.LatenciesReceived),
+						Stats:      m.stats.Summary(end),
 					}
+				} else {
+					result.Err = fmt.Errorf("process event %s: %w", event.Event, err)
 				}
-
-				if err := utils.KillProcess(pid); err != nil {
-					log.Errorf("failed to kill process: %v", err)
-				}
-				log.Fatalf("error processing event: %v %s", err, event.Event)
+				return
 			}
 
 			m.stats.LatenciesProcessed = append(m.stats.LatenciesProcessed, time.Since(time.Unix(0, event.Time)))
@@ -872,25 +938,76 @@ func (m *Monitor) ProcessEvents(events <-chan *TimedEvent, rewrite bool, pid int
 				for _, group := range actions {
 					for _, f := range group {
 						if r := getRewriteTerm(f); r != nil {
-							fr := term.Must(term.AsFunction(r))
-							out <- &TimedEvent{Time: event.Time, Event: fr}
+							fr, err := term.AsFunction(r)
+							if err != nil {
+								result.Err = fmt.Errorf("rewrite action %s: %w", f, err)
+								return
+							}
+							select {
+							case out <- &TimedEvent{Time: event.Time, Event: fr}:
+							case <-ctx.Done():
+								result.Err = ctx.Err()
+								return
+							}
 						}
 					}
 				}
 			} else {
-				consumed <- event.Event
-			}
-		}
-
-		log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
-		for _, c := range m.configs.Values() {
-			for _, f := range c.Facts() {
-				log.Warnf("  %s\n", f.Name)
+				select {
+				case consumed <- event.Event:
+				case <-ctx.Done():
+					result.Err = ctx.Err()
+					return
+				}
 			}
 		}
 	}()
 
-	return out, consumed
+	return EventStreams{
+		Outputs:  out,
+		Consumed: consumed,
+		Terminal: terminal,
+	}
+}
+
+func (m *Monitor) logFinalConfigs() {
+	log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
+	for _, c := range m.configs.Values() {
+		for _, f := range c.Facts() {
+			log.Warnf("  %s\n", f.Name)
+		}
+	}
+}
+
+func cloneTimedEvent(event *TimedEvent) *TimedEvent {
+	if event == nil {
+		return nil
+	}
+	cloned, _ := cloneTerm(event.Event).(*term.Function)
+	return &TimedEvent{Time: event.Time, Event: cloned}
+}
+
+func cloneTerm(t term.Term) term.Term {
+	switch value := t.(type) {
+	case nil:
+		return nil
+	case *term.Constant[int]:
+		return term.NewConstant(value.Value)
+	case *term.Constant[string]:
+		return term.NewConstant(value.Value)
+	case *term.Constant[[]byte]:
+		return term.NewConstant(slices.Clone(value.Value))
+	case *term.Variable:
+		return term.NewVariable(value.Name)
+	case *term.Function:
+		args := make([]term.Term, len(value.Args))
+		for i, arg := range value.Args {
+			args[i] = cloneTerm(arg)
+		}
+		return term.NewFunction(value.Name, args)
+	default:
+		return nil
+	}
 }
 
 func getRewriteTerm(f *rule.Fact) term.Term {
@@ -916,18 +1033,24 @@ func checkWellformedness(rules []*rule.Rule) error {
 // splitPairSignature returns the (name, arity) of the first component of
 // a hint/trigger pair. Used to bucket rules into triggerRules / hintRules
 // so dispatch is by (name, arity) rather than name only.
-func splitPairSignature(t term.Term) (string, int) {
+func splitPairSignature(t term.Term) (string, int, error) {
 	fn, _ := splitPair(t)
 	if fn == nil {
-		log.Fatalf("unexpected hint or trigger: %s", t)
+		return "", 0, fmt.Errorf("expected event pair, got %s", t)
 	}
-	parsed := term.Must(term.AsFunction(fn))
-	return parsed.Name, len(parsed.Args)
+	parsed, err := term.AsFunction(fn)
+	if err != nil {
+		return "", 0, fmt.Errorf("expected event function, got %s: %w", fn, err)
+	}
+	return parsed.Name, len(parsed.Args), nil
 }
 
 // ruleKeyForTerm returns the ruleKey of the first component of a
 // hint/trigger pair.
-func ruleKeyForTerm(t term.Term) ruleKey {
-	name, arity := splitPairSignature(t)
-	return ruleKey{name: name, arity: arity}
+func ruleKeyForTerm(t term.Term) (ruleKey, error) {
+	name, arity, err := splitPairSignature(t)
+	if err != nil {
+		return ruleKey{}, err
+	}
+	return ruleKey{name: name, arity: arity}, nil
 }

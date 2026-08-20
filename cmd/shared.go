@@ -38,8 +38,8 @@ import (
 )
 
 // ProcessRules parses the rules from the given path and returns the original, the selected and the decomposed rules.
-func ProcessRules(specPath, role string, decompose bool, defines []string) ([]*rule.Rule, []*rule.Rule, []*rule.Rule, error) {
-	rules, err := parser.ParseFile(context.Background(), specPath, defines)
+func ProcessRules(ctx context.Context, specPath, role string, decompose bool, defines []string) ([]*rule.Rule, []*rule.Rule, []*rule.Rule, error) {
+	rules, err := parser.ParseFile(ctx, specPath, defines)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("cannot process rules: %w", err)
 	}
@@ -117,99 +117,139 @@ func createSocketServer(address string) (io.ReadCloser, error) {
 
 // multiplexedReader handles multiple concurrent connections and merges their event streams.
 type multiplexedReader struct {
-	listener  net.Listener
-	eventChan chan []byte
-	closeChan chan struct{}
-	closeOnce sync.Once
+	listener net.Listener
+	reader   *io.PipeReader
+	writer   *io.PipeWriter
+	workers  sync.WaitGroup
+	clients  clientConnections
+}
+
+type clientConnections struct {
+	sync.Mutex
+	closed bool
+	active map[net.Conn]struct{}
 }
 
 func newMultiplexedReader(listener net.Listener) *multiplexedReader {
+	reader, writer := io.Pipe()
 	mr := &multiplexedReader{
-		listener:  listener,
-		eventChan: make(chan []byte, 1000), // Buffer for events
-		closeChan: make(chan struct{}),
+		listener: listener,
+		reader:   reader,
+		writer:   writer,
+		clients: clientConnections{
+			active: make(map[net.Conn]struct{}),
+		},
 	}
 
 	// Start accepting connections in the background
+	mr.workers.Add(1)
 	go mr.acceptConnections()
 
 	return mr
 }
 
 func (mr *multiplexedReader) acceptConnections() {
+	defer mr.workers.Done()
+
 	for {
-		select {
-		case <-mr.closeChan:
-			return
-		default:
-			conn, err := mr.listener.Accept()
-			if err != nil {
-				select {
-				case <-mr.closeChan:
-					return // Listener was closed, expected error
-				default:
-					log.Fatalf("Error accepting connection: %v\n", err)
-					continue
-				}
+		conn, err := mr.listener.Accept()
+		if err != nil {
+			if !mr.clients.isClosed() {
+				_ = mr.writer.CloseWithError(fmt.Errorf("accept connection: %w", err))
 			}
-
-			log.Infof("Client connected from %s\n", conn.RemoteAddr())
-
-			// Handle each connection in its own goroutine
-			go mr.handleConnection(conn)
+			return
 		}
+
+		if !mr.clients.add(conn) {
+			_ = conn.Close()
+			return
+		}
+
+		log.Infof("Client connected from %s\n", conn.RemoteAddr())
+		mr.workers.Add(1)
+		go mr.handleConnection(conn)
 	}
 }
 
 func (mr *multiplexedReader) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	defer log.Infof("Client %s disconnected\n", conn.RemoteAddr())
+	defer func() {
+		_ = conn.Close()
+		mr.clients.remove(conn)
+		mr.workers.Done()
+		log.Infof("Client %s disconnected\n", conn.RemoteAddr())
+	}()
 
 	scanner := bufio.NewScanner(conn)
 	// Increase buffer size to handle very large cryptographic events
 	scanner.Buffer(make([]byte, 8*1024*1024), 8*1024*1024) // 8MB buffer
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		// Make a copy since scanner reuses the underlying buffer
-		event := make([]byte, len(line))
-		copy(event, line)
-
-		select {
-		case mr.eventChan <- event:
-			// Event sent successfully
-		case <-mr.closeChan:
-			return // Multiplexer is being closed
+		event := append([]byte(nil), scanner.Bytes()...)
+		event = append(event, '\n')
+		if _, err := mr.writer.Write(event); err != nil {
+			return
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading from client %s: %v (continuing...)\n", conn.RemoteAddr(), err)
-		// Don't return immediately on scanner errors - they might be recoverable
-		// or due to large events. Continue processing other events.
+		log.Warnf("Error reading from client %s: %v, continuing with other clients\n", conn.RemoteAddr(), err)
 	}
 }
 
 func (mr *multiplexedReader) Read(p []byte) (n int, err error) {
-	select {
-	case event := <-mr.eventChan:
-		// Add newline back since we need it for event parsing
-		event = append(event, '\n')
-		if len(event) > len(p) {
-			return 0, fmt.Errorf("buffer too small for event")
-		}
-		copy(p, event)
-		return len(event), nil
-	case <-mr.closeChan:
-		return 0, io.EOF
-	}
+	return mr.reader.Read(p)
 }
 
 func (mr *multiplexedReader) Close() error {
-	mr.closeOnce.Do(func() {
-		mr.listener.Close()
-		close(mr.closeChan)
-	})
-	return nil
+	if !mr.clients.closeAll() {
+		return nil
+	}
+
+	_ = mr.reader.Close()
+	_ = mr.writer.Close()
+	closeErr := mr.listener.Close()
+	mr.workers.Wait()
+	return closeErr
+}
+
+func (clients *clientConnections) add(conn net.Conn) bool {
+	clients.Lock()
+	defer clients.Unlock()
+	if clients.closed {
+		return false
+	}
+	clients.active[conn] = struct{}{}
+	return true
+}
+
+func (clients *clientConnections) remove(conn net.Conn) {
+	clients.Lock()
+	defer clients.Unlock()
+	delete(clients.active, conn)
+}
+
+func (clients *clientConnections) isClosed() bool {
+	clients.Lock()
+	defer clients.Unlock()
+	return clients.closed
+}
+
+func (clients *clientConnections) closeAll() bool {
+	clients.Lock()
+	if clients.closed {
+		clients.Unlock()
+		return false
+	}
+	clients.closed = true
+	active := make([]net.Conn, 0, len(clients.active))
+	for conn := range clients.active {
+		active = append(active, conn)
+	}
+	clients.Unlock()
+
+	for _, conn := range active {
+		_ = conn.Close()
+	}
+	return true
 }
 
 // getOutputFile returns the output file.

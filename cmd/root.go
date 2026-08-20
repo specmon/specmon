@@ -19,6 +19,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime/pprof"
@@ -63,8 +64,8 @@ func DefaultRootConfig() *RootConfig {
 // RunE is the main function of the root command.
 // The command parses a specification, and if requested,
 // performs a filtering and decomposition of the rules.
-func (c *RootConfig) RunE() error {
-	rules, selectedRules, decompRules, err := ProcessRules(c.SpecPath, c.Role, c.Decompose, c.Defines)
+func (c *RootConfig) RunE(ctx context.Context) error {
+	rules, selectedRules, decompRules, err := ProcessRules(ctx, c.SpecPath, c.Role, c.Decompose, c.Defines)
 	if err != nil {
 		return err
 	}
@@ -183,10 +184,10 @@ func NewRootCmd() *cobra.Command {
 		Use:   Name,
 		Short: "SpecMon",
 		Long:  "SpecMon is a runtime specification monitor using multiset-rewrite rules",
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			rootConfig.SpecPath = args[0]
 
-			return rootConfig.RunE()
+			return rootConfig.RunE(cmd.Context())
 		},
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 			return rootConfig.PersistentPreRunE()

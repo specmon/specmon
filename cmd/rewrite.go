@@ -1,4 +1,4 @@
-// Copyright (C) 2025 CISPA Helmholtz Center for Information Security
+// Copyright (C) 2025-2026 CISPA Helmholtz Center for Information Security
 // Author: Kevin Morio <kevin.morio@cispa.de>
 //
 // This file is part of SpecMon.
@@ -19,7 +19,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -34,24 +36,12 @@ type RewriteConfig struct {
 	JSON bool   `flag:"json" short:"j" desc:"output in json format"`
 	In   string `flag:"in"   short:"i" desc:"input path (file, '-', host:port)"`
 	Out  string `flag:"out"  short:"o" desc:"output path"`
-	Pid  int    `flag:"pid"  short:"P" desc:"PID of the monitored process to terminate"`
 }
 
 // RunE runs the rewrite subcommand.
 func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
-	// quiet, _ := cmd.Root().Flags().GetBool("quiet")
-
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM)
-
-	var m *monitor.Monitor
-	go func() {
-		<-sigs
-
-		fmt.Fprintln(os.Stderr, "SIGTERM received, exiting...")
-
-		os.Exit(0)
-	}()
+	runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	specPath := args[0]
 
@@ -59,7 +49,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
 	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 
-	_, _, decompRules, err := ProcessRules(specPath, role, decompose, defines)
+	_, _, decompRules, err := ProcessRules(runCtx, specPath, role, decompose, defines)
 	if err != nil {
 		return fmt.Errorf("cannot process rules: %w", err)
 	}
@@ -68,38 +58,47 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open input: %w", err)
 	}
-	defer eventSource.Close()
-
-	m, err = monitor.NewMonitor(decompRules)
+	m, err := monitor.NewMonitor(decompRules)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
 
-	events := monitor.ParseEvents(eventSource, -1)
-	outs, _ := m.ProcessEvents(events, true, -1)
-
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {
+		eventSource.Close()
 		return fmt.Errorf("cannot open out file: %w", err)
 	}
-	defer outFile.Close()
 
-	for out := range outs {
+	runErr := m.Rewrite(runCtx, eventSource, func(out *monitor.TimedEvent) error {
 		if r.JSON {
-			var b []byte
-
-			b, err = json.Marshal(out)
+			b, err := json.Marshal(out)
 			if err != nil {
 				return fmt.Errorf("cannot marshal to json: %w", err)
 			}
-			_, err = fmt.Fprintln(outFile, string(b))
-		} else {
-			_, err = fmt.Fprintln(outFile, out)
+			if _, err := fmt.Fprintln(outFile, string(b)); err != nil {
+				return fmt.Errorf("cannot write to out file: %w", err)
+			}
+			return nil
 		}
-
-		if err != nil {
+		if _, err := fmt.Fprintln(outFile, out); err != nil {
 			return fmt.Errorf("cannot write to out file: %w", err)
 		}
+		return nil
+	})
+
+	var closeErr error
+	if outFile != os.Stdout {
+		closeErr = outFile.Close()
+	}
+	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) && cmd.Context().Err() == nil {
+			fmt.Fprintln(cmd.ErrOrStderr(), "signal received, exiting")
+			return nil
+		}
+		return fmt.Errorf("rewrite events: %w", runErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close out file: %w", closeErr)
 	}
 
 	return nil
