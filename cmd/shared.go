@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/specmon/specmon/parser"
 	"github.com/specmon/specmon/rule"
@@ -109,6 +110,11 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 		case reflect.Int:
 			value := int(fieldValue.Int())
 			cmd.PersistentFlags().IntVarP(fieldValue.Addr().Interface().(*int), flag, short, value, desc)
+		case reflect.Int64:
+			if fieldValue.Type() == reflect.TypeOf(time.Duration(0)) {
+				value := time.Duration(fieldValue.Int())
+				cmd.PersistentFlags().DurationVarP(fieldValue.Addr().Interface().(*time.Duration), flag, short, value, desc)
+			}
 		default:
 			// Ignore unsupported fields
 		}

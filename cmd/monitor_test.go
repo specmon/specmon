@@ -89,8 +89,15 @@ func TestMonitorPIDFlagAndDomain(t *testing.T) {
 			t.Fatalf("monitor pid help exposes a default: %q", line)
 		}
 	}
+	timeoutFlag := monitorCmd.PersistentFlags().Lookup("on-violation-timeout")
+	if timeoutFlag == nil || timeoutFlag.DefValue != defaultViolationHookTimeout.String() {
+		t.Fatalf("monitor hook timeout default = %v, want %s", timeoutFlag, defaultViolationHookTimeout)
+	}
 	if flag := NewRewriteCmd().PersistentFlags().Lookup("pid"); flag != nil {
 		t.Fatalf("rewrite unexpectedly exposes pid flag: %v", flag)
+	}
+	if flag := NewRewriteCmd().PersistentFlags().Lookup("on-violation"); flag != nil {
+		t.Fatalf("rewrite unexpectedly exposes on-violation flag: %v", flag)
 	}
 
 	missingValueCmd := NewMonitorCmd()
@@ -109,6 +116,10 @@ func TestMonitorPIDFlagAndDomain(t *testing.T) {
 		if err := config.RunE(cmd, []string{"unused"}); err == nil {
 			t.Fatalf("MonitorConfig accepted pid %d", pid)
 		}
+	}
+	config := MonitorConfig{OnViolationTimeout: -time.Second}
+	if err := config.RunE(monitorTestCommand(), []string{"unused"}); err == nil {
+		t.Fatal("MonitorConfig accepted a negative violation hook timeout")
 	}
 }
 
