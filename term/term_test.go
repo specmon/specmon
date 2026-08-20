@@ -19,6 +19,7 @@
 package term_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/specmon/specmon/term"
@@ -191,6 +192,44 @@ func TestUnify(t *testing.T) {
 		if err != nil && !test.expectError {
 			t.Errorf("not expecting error but got one: %s", err.Error())
 		}
+	}
+}
+
+func TestUnifyReturnsEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	_, err := invalid.Unify(term.NewConstant(1))
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("Unify error = %v, want ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("Unify error = %v, want wrapped ErrBinaryArity", err)
+	}
+}
+
+func TestReplaceFormatsReturnsEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	_, err := term.ReplaceFormats(invalid)
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("ReplaceFormats error = %v, want ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("ReplaceFormats error = %v, want wrapped ErrBinaryArity", err)
+	}
+
+	partial := term.NewFunction(term.AddFunctionName, []term.Term{
+		term.NewVariable("x"),
+		term.NewConstant(1),
+	})
+	got, err := term.ReplaceFormats(partial)
+	if err != nil {
+		t.Fatalf("ReplaceFormats returned an error for an unbound term: %v", err)
+	}
+	if !got.Equal(partial) {
+		t.Fatalf("ReplaceFormats returned %s, want unchanged %s", got, partial)
 	}
 }
 

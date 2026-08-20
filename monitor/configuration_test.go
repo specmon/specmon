@@ -19,6 +19,7 @@
 package monitor_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/specmon/specmon/data"
@@ -387,5 +388,57 @@ func TestApplyRuleEvaluatesButDoesNotStoreInternalRHSFacts(t *testing.T) {
 	publicFacts := result.FactsAsSliceWithName("ST_Public")
 	if len(publicFacts) != 1 || len(publicFacts[0].Args) != 1 || !publicFacts[0].Args[0].Equal(term.NewConstant(3)) {
 		t.Fatalf("ordinary RHS evaluation changed: %v", publicFacts)
+	}
+}
+
+func TestApplyRuleReturnsEvaluationErrorsBeforePublishing(t *testing.T) {
+	t.Parallel()
+
+	const existingFactName = "Existing"
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	for _, test := range []struct {
+		name string
+		act  []*rule.Fact
+		rhs  []*rule.Fact
+	}{
+		{
+			name: "action",
+			act: []*rule.Fact{
+				rule.NewFact("InvalidAction", []term.Term{invalid}, rule.LinearFact),
+			},
+		},
+		{
+			name: "RHS",
+			rhs: []*rule.Fact{
+				rule.NewFact("InvalidRHS", []term.Term{invalid}, rule.LinearFact),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := monitor.NewConfig()
+			config.AddFact(rule.NewFact(existingFactName, nil, rule.LinearFact))
+			r := &rule.Rule{
+				Name:  "InvalidEvaluation",
+				LHS:   []*rule.Fact{rule.NewFact(existingFactName, nil, rule.LinearFact)},
+				Act:   test.act,
+				RHS:   test.rhs,
+				Attrs: map[string]rule.Attribute{},
+			}
+
+			result, actions, err := config.ApplyRule(r, term.NewBinding())
+			if !errors.Is(err, term.ErrEvaluation) {
+				t.Fatalf("ApplyRule error = %v, want ErrEvaluation", err)
+			}
+			if !errors.Is(err, term.ErrBinaryArity) {
+				t.Fatalf("ApplyRule error = %v, want wrapped ErrBinaryArity", err)
+			}
+			if result != nil || actions != nil {
+				t.Fatalf("ApplyRule published result %v or actions %v", result, actions)
+			}
+			if config.CountByName(existingFactName) != 1 {
+				t.Fatalf("ApplyRule mutated the source configuration: %v", config.Facts())
+			}
+		})
 	}
 }

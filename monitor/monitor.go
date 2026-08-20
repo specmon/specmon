@@ -50,6 +50,7 @@ const (
 var (
 	ErrNoApplicableRule    = errors.New("no applicable rule found")
 	ErrRestrictionViolated = errors.New("restriction violated")
+	errCandidateEvaluation = errors.New("trigger or hint candidate evaluation failed")
 )
 
 type Unifier[T any] interface {
@@ -246,6 +247,7 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 
 	updated := data.NewHashSet[*Config]()
 	var actions [][]*rule.Fact
+	var candidateEvaluationErr error
 
 	aKey := ruleKeyForTerm(a)
 
@@ -255,6 +257,12 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 		for _, r := range m.triggerRules[aKey] {
 			next, err := m.handleTriggers(c, a, r)
 			if err != nil {
+				if errors.Is(err, errCandidateEvaluation) {
+					if candidateEvaluationErr == nil {
+						candidateEvaluationErr = err
+					}
+					continue
+				}
 				return nil, err
 			}
 
@@ -266,6 +274,12 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 		for _, r := range m.hintRules[aKey] {
 			next, err := m.handleHints(c, a, r)
 			if err != nil {
+				if errors.Is(err, errCandidateEvaluation) {
+					if candidateEvaluationErr == nil {
+						candidateEvaluationErr = err
+					}
+					continue
+				}
 				return nil, err
 			}
 
@@ -323,6 +337,10 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 	}
 
 	if updated.Empty() {
+		if candidateEvaluationErr != nil {
+			return nil, candidateEvaluationErr
+		}
+
 		possibleEvents := m.findPossibleEvents()
 		for i, events := range possibleEvents {
 			log.Errorf("allowed events in configuration %d:\n", i)
@@ -394,6 +412,7 @@ func getUniqueBinding(matches []term.Term, target term.Term) (*term.Binding, err
 	log.Infof("     getUniqueBinding(%s, %s)\n", matches, target)
 
 	var unique *term.Binding
+	var evaluationErr error
 
 	for _, t := range matches {
 		u, err := target.Unify(t)
@@ -401,6 +420,9 @@ func getUniqueBinding(matches []term.Term, target term.Term) (*term.Binding, err
 		if err != nil {
 			log.Infof("              no match: %v\n", err)
 			log.Infof("              u: %v\n", u)
+			if evaluationErr == nil && errors.Is(err, term.ErrEvaluation) {
+				evaluationErr = err
+			}
 
 			continue
 		}
@@ -414,6 +436,9 @@ func getUniqueBinding(matches []term.Term, target term.Term) (*term.Binding, err
 	}
 
 	if unique == nil {
+		if evaluationErr != nil {
+			return nil, evaluationErr
+		}
 		return nil, errors.New("no unique and compatible binding found")
 	}
 
@@ -436,6 +461,10 @@ func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleAp
 	// trigger contains format expressions with functions of unbound
 	// variables that cannot be evaluated without LHS-derived bindings.
 	triggerBinding, triggerErr := getUniqueBinding(rawTriggers, a)
+	var candidateEvaluationErr error
+	if errors.Is(triggerErr, term.ErrEvaluation) {
+		candidateEvaluationErr = triggerErr
+	}
 
 	var lhsPatterns []*rule.Fact
 	if triggerErr == nil {
@@ -456,6 +485,9 @@ func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleAp
 			instTriggers := term.Terms(rawTriggers).Subst(b)
 			u, err := getUniqueBinding(instTriggers, a)
 			if err != nil {
+				if candidateEvaluationErr == nil && errors.Is(err, term.ErrEvaluation) {
+					candidateEvaluationErr = err
+				}
 				continue
 			}
 			bt = b.Extend(u)
@@ -500,6 +532,10 @@ func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleAp
 		}
 	}
 
+	if len(C) == 0 && candidateEvaluationErr != nil {
+		return nil, fmt.Errorf("%w: %w", errCandidateEvaluation, candidateEvaluationErr)
+	}
+
 	return C, nil
 }
 
@@ -517,6 +553,10 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 	// to narrow the LHS fact search; fall back to the original O(N)
 	// approach when hint evaluation requires LHS-derived bindings.
 	hintBinding, hintErr := getUniqueBinding(rawHints, a)
+	var candidateEvaluationErr error
+	if errors.Is(hintErr, term.ErrEvaluation) {
+		candidateEvaluationErr = hintErr
+	}
 
 	var lhsPatterns []*rule.Fact
 	if hintErr == nil {
@@ -536,6 +576,9 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 			instHints := term.Terms(rawHints).Subst(b)
 			u, err := getUniqueBinding(instHints, a)
 			if err != nil {
+				if candidateEvaluationErr == nil && errors.Is(err, term.ErrEvaluation) {
+					candidateEvaluationErr = err
+				}
 				continue
 			}
 			hb = b.Extend(u)
@@ -557,15 +600,25 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 		gKey := ruleKeyForTerm(g)
 
 		var D []RuleApplication
+		var downstreamCandidateErr error
 		for _, rr := range m.triggerRules[gKey] {
 			next, err := m.handleTriggers(d, g, rr)
 			if err != nil {
+				if errors.Is(err, errCandidateEvaluation) {
+					if downstreamCandidateErr == nil {
+						downstreamCandidateErr = err
+					}
+					continue
+				}
 				return nil, err
 			}
 			D = append(D, next...)
 		}
 
 		if len(D) == 0 {
+			if downstreamCandidateErr != nil {
+				return nil, downstreamCandidateErr
+			}
 			return nil, fmt.Errorf("no applicable rule found after accepting hint %s", g)
 		}
 
@@ -576,6 +629,10 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 			// avoid aliasing hintActs across iterations.
 			C = append(C, RuleApplication{rule: r, binding: hb, config: t.config, actions: concatActions(hintActs, t.actions)})
 		}
+	}
+
+	if len(C) == 0 && candidateEvaluationErr != nil {
+		return nil, fmt.Errorf("%w: %w", errCandidateEvaluation, candidateEvaluationErr)
 	}
 
 	return C, nil

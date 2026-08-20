@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"log"
 	"slices"
 	"strconv"
 	"strings"
@@ -78,6 +77,7 @@ var (
 	ErrInvalidFormat          = errors.New("invalid format")
 	ErrOccursCheckFailed      = errors.New("occurs check failed")
 	ErrUnknownType            = errors.New("unknown type")
+	ErrEvaluation             = errors.New("term evaluation failed")
 
 	ErrInvalidFormatFunction = errors.New("invalid format: expected byte(), string(), int()")
 
@@ -800,16 +800,12 @@ func Unify(t1, t2 Term) (*Binding, error) {
 
 	a1, err := Evaluate(t1)
 	if err != nil {
-		log.Fatal(err)
-
-		return nil, err
+		return nil, fmt.Errorf("%w for %s: %w", ErrEvaluation, t1, err)
 	}
 
 	a2, err := Evaluate(t2)
 	if err != nil {
-		log.Fatal(err)
-
-		return nil, err
+		return nil, fmt.Errorf("%w for %s: %w", ErrEvaluation, t2, err)
 	}
 
 	err = unify(a1, a2, b)
@@ -1058,13 +1054,13 @@ func ReplaceBinding(t Term, b *Binding) Term {
 	})
 }
 
-func ReplaceFormats(t Term) Term {
+func ReplaceFormats(t Term) (Term, error) {
 	s, err := Evaluate(t)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("%w for %s: %w", ErrEvaluation, t, err)
 	}
 
-	return s
+	return s, nil
 }
 
 func Evaluate(t Term) (Term, error) {

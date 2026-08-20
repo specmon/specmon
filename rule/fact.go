@@ -167,6 +167,9 @@ func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
 	for i, a := range f.Args {
 		b1, err := a.Unify(other.Args[i])
 		if err != nil {
+			if errors.Is(err, term.ErrEvaluation) {
+				return nil, fmt.Errorf("%w: %w", ErrFactUnify, err)
+			}
 			// return nil, fmt.Errorf("cannot unify %s and %s: %w", f, other, err)
 			return nil, ErrFactUnify
 		}
@@ -224,13 +227,17 @@ func (f *Fact) IsGround() bool {
 	return true
 }
 
-func (f *Fact) ReplaceFormats() *Fact {
+func (f *Fact) ReplaceFormats() (*Fact, error) {
 	args := make([]term.Term, len(f.Args))
 	for i, a := range f.Args {
-		args[i] = term.ReplaceFormats(a)
+		var err error
+		args[i], err = term.ReplaceFormats(a)
+		if err != nil {
+			return nil, fmt.Errorf("replace formats in fact %s argument %d: %w", f.Name, i, err)
+		}
 	}
 
-	return NewFact(f.Name, args, f.Type)
+	return NewFact(f.Name, args, f.Type), nil
 }
 
 func (f *Fact) HasFunctions() bool {

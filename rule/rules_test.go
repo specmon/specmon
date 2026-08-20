@@ -19,6 +19,7 @@
 package rule_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -177,5 +178,60 @@ func TestRulesDropUnusedRHSFacts(t *testing.T) {
 	got[0].RHS = producer.RHS
 	if got[0].String() != original || got[1].String() != consumer.String() {
 		t.Fatalf("rules changed outside the RHS:\n%s\n%s", got[0], got[1])
+	}
+}
+
+func TestFactReplaceFormatsReturnsEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	fact := rule.NewFact("Evaluated", []term.Term{invalid}, rule.LinearFact)
+
+	_, err := fact.ReplaceFormats()
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("Fact.ReplaceFormats error = %v, want ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("Fact.ReplaceFormats error = %v, want wrapped ErrBinaryArity", err)
+	}
+}
+
+func TestFactUnifyPreservesEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	left := rule.NewFact("Evaluated", []term.Term{invalid}, rule.LinearFact)
+	right := rule.NewFact("Evaluated", []term.Term{term.NewConstant(1)}, rule.LinearFact)
+
+	_, err := left.Unify(right)
+	if !errors.Is(err, rule.ErrFactUnify) {
+		t.Fatalf("Fact.Unify error = %v, want ErrFactUnify", err)
+	}
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("Fact.Unify error = %v, want wrapped ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("Fact.Unify error = %v, want wrapped ErrBinaryArity", err)
+	}
+}
+
+func TestRuleReplaceFormatsReturnsEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	r := &rule.Rule{
+		Name: "InvalidEvaluation",
+		RHS: []*rule.Fact{
+			rule.NewFact("Evaluated", []term.Term{invalid}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{},
+	}
+
+	_, err := r.ReplaceFormats()
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("Rule.ReplaceFormats error = %v, want ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("Rule.ReplaceFormats error = %v, want wrapped ErrBinaryArity", err)
 	}
 }

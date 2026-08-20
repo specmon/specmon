@@ -400,7 +400,11 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, []*rule.Fact
 	for _, f := range s.Triggers() {
 		t = t.Subst(splitTupleBinding(f))
 	}
-	t = t.ReplaceFormats()
+	var err error
+	t, err = t.ReplaceFormats()
+	if err != nil {
+		return nil, nil, fmt.Errorf("evaluate rule %s: %w", r.Name, err)
+	}
 
 	if !t.IsGround() {
 		return nil, nil, fmt.Errorf("expected ground rule (%s), got variables: %v", t.Name, s.Vars())
@@ -425,7 +429,11 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, []*rule.Fact
 	// Remove triggers from seen events.
 	// Triggers in s still contain formats.
 	for _, f := range s.Triggers() {
-		if !d.DeleteSeen(term.ReplaceFormats(f)) {
+		resolved, err := term.ReplaceFormats(f)
+		if err != nil {
+			return nil, nil, fmt.Errorf("evaluate trigger for rule %s: %w", r.Name, err)
+		}
+		if !d.DeleteSeen(resolved) {
 			return nil, nil, fmt.Errorf("cannot delete non-existing event '%s'", f)
 		}
 	}

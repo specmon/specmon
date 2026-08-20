@@ -19,6 +19,7 @@
 package monitor_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -809,5 +810,143 @@ func TestMonitorSameSignatureTriggersRegisteredOnce(t *testing.T) {
 	if len(actions) != 1 {
 		t.Errorf("expected exactly 1 action group for one rule firing, got %d "+
 			"(duplicate trigger-key registration repeats identical applications)", len(actions))
+	}
+}
+
+func TestProcessEventHandlesInvalidEvaluatedCandidates(t *testing.T) {
+	t.Parallel()
+
+	const (
+		eventFunctionName = "evaluationEvent"
+		setupFunctionName = "evaluationSetup"
+		stateFactName     = "EvaluationState"
+		invalidRuleName   = "InvalidCandidate"
+		validRuleName     = "ValidCandidate"
+		setupRuleName     = "EvaluationSetup"
+	)
+
+	pairEvent := func(name string, value term.Term) term.Term {
+		return term.NewFunction(term.PairFunctionName, []term.Term{
+			term.NewFunction(name, nil),
+			value,
+		})
+	}
+	invalidArgument := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	invalidCandidate := pairEvent(eventFunctionName, invalidArgument)
+	validCandidate := pairEvent(eventFunctionName, term.NewVariable("value"))
+	event := pairEvent(eventFunctionName, term.NewConstant(2))
+	setupEvent := pairEvent(setupFunctionName, term.NewFunction(term.PairFunctionName, nil))
+
+	for _, attributeName := range []string{rule.TriggerAttributeName, rule.HintAttributeName} {
+		t.Run(attributeName, func(t *testing.T) {
+			setupRule := &rule.Rule{
+				Name: setupRuleName,
+				RHS:  []*rule.Fact{rule.NewFact(stateFactName, nil, rule.LinearFact)},
+				Attrs: map[string]rule.Attribute{
+					rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{setupEvent}},
+				},
+			}
+			invalidRule := &rule.Rule{
+				Name: invalidRuleName,
+				LHS:  []*rule.Fact{rule.NewFact(stateFactName, nil, rule.LinearFact)},
+				Attrs: map[string]rule.Attribute{
+					attributeName: rule.TermAttribute{Value: []term.Term{invalidCandidate}},
+				},
+			}
+			validRule := &rule.Rule{
+				Name: validRuleName,
+				LHS:  []*rule.Fact{rule.NewFact(stateFactName, nil, rule.LinearFact)},
+				Attrs: map[string]rule.Attribute{
+					rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{validCandidate}},
+				},
+			}
+
+			for _, test := range []struct {
+				name      string
+				withValid bool
+			}{
+				{name: "valid candidate", withValid: true},
+				{name: "no valid candidate"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					rules := []*rule.Rule{setupRule, invalidRule}
+					if test.withValid {
+						rules = append(rules, validRule)
+					}
+
+					mon, err := monitor.NewMonitor(rules)
+					if err != nil {
+						t.Fatalf("NewMonitor: %v", err)
+					}
+					if _, err := mon.ProcessEvent(setupEvent); err != nil {
+						t.Fatalf("ProcessEvent setup: %v", err)
+					}
+
+					_, err = mon.ProcessEvent(event)
+					if test.withValid {
+						if err != nil {
+							t.Fatalf("ProcessEvent rejected a valid candidate after an invalid one: %v", err)
+						}
+						return
+					}
+					if !errors.Is(err, term.ErrEvaluation) {
+						t.Fatalf("ProcessEvent error = %v, want ErrEvaluation", err)
+					}
+					if !errors.Is(err, term.ErrBinaryArity) {
+						t.Fatalf("ProcessEvent error = %v, want wrapped ErrBinaryArity", err)
+					}
+					if errors.Is(err, monitor.ErrNoApplicableRule) {
+						t.Fatalf("ProcessEvent classified evaluator failure as a violation: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
+	t.Parallel()
+
+	const (
+		eventFunctionName = "epsilonEvaluationEvent"
+		triggerRuleName   = "TriggerEpsilonEvaluation"
+		epsilonRuleName   = "InvalidEpsilonEvaluation"
+		invalidFactName   = "InvalidEpsilonResult"
+	)
+
+	event := term.NewFunction(term.PairFunctionName, []term.Term{
+		term.NewFunction(eventFunctionName, nil),
+		term.NewFunction(term.PairFunctionName, nil),
+	})
+	triggerRule := &rule.Rule{
+		Name: triggerRuleName,
+		Attrs: map[string]rule.Attribute{
+			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{event}},
+		},
+	}
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
+	epsilonRule := &rule.Rule{
+		Name: epsilonRuleName,
+		RHS: []*rule.Fact{
+			rule.NewFact(invalidFactName, []term.Term{invalid}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{},
+	}
+
+	mon, err := monitor.NewMonitor([]*rule.Rule{triggerRule, epsilonRule})
+	if err != nil {
+		t.Fatalf("NewMonitor: %v", err)
+	}
+	_, err = mon.ProcessEvent(event)
+	if !errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("ProcessEvent error = %v, want ErrEvaluation", err)
+	}
+	if !errors.Is(err, term.ErrBinaryArity) {
+		t.Fatalf("ProcessEvent error = %v, want wrapped ErrBinaryArity", err)
+	}
+	for _, config := range mon.Configs() {
+		if config.CountByName(invalidFactName) != 0 {
+			t.Fatalf("ProcessEvent published an invalid epsilon result: %v", config.Facts())
+		}
 	}
 }
