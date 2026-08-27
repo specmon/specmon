@@ -112,7 +112,9 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	var rewriter *monitor.Monitor
 	if r.RewriteWith != "" {
-		_, _, rewriteRules, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
+		// Rewrite rules translate instrumentation events independently of the
+		// monitored protocol role.
+		rewriteRules, _, _, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
 		if err != nil {
 			return fmt.Errorf("cannot process rewrite rules: %w", err)
 		}

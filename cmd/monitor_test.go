@@ -35,7 +35,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const monitorTestEventName = "monitorTestEvent"
+const (
+	monitorTestEventName          = "monitorTestEvent"
+	monitorTestRewrittenEventName = "monitorTestRewrittenEvent"
+)
 
 func writeMonitorInput(t *testing.T, contents []byte) string {
 	t.Helper()
@@ -153,5 +156,45 @@ func TestMonitorTerminatesPIDOnlyForViolations(t *testing.T) {
 				t.Fatalf("terminate process called %d times, want %d", got, test.wantKills)
 			}
 		})
+	}
+}
+
+func TestMonitorRewriteRulesIgnoreMainRole(t *testing.T) {
+	tempDir := t.TempDir()
+	mainSpecPath := filepath.Join(tempDir, "main.spthy")
+	rewriteSpecPath := filepath.Join(tempDir, "rewrite.spthy")
+	mainSpec := `theory Main
+begin
+
+rule Server [no-decomp, role="Server", trigger=[<monitorTestRewrittenEvent(), <>>]]:
+  [ ] --> [ ]
+
+end
+`
+	rewriteSpec := `theory Rewrite
+begin
+
+rule Rewrite [no-decomp, trigger=[<monitorTestEvent(), <>>]]:
+  [ ] --[ PPEvent(<monitorTestRewrittenEvent(), <>>) ]-> [ ]
+
+end
+`
+	if err := os.WriteFile(mainSpecPath, []byte(mainSpec), 0o600); err != nil {
+		t.Fatalf("write main specification: %v", err)
+	}
+	if err := os.WriteFile(rewriteSpecPath, []byte(rewriteSpec), 0o600); err != nil {
+		t.Fatalf("write rewrite specification: %v", err)
+	}
+
+	cmd := monitorTestCommand()
+	cmd.Flags().String("role", "Server", "")
+	cmd.Flags().Bool("decompose", true, "")
+	cmd.Flags().StringSlice("defines", nil, "")
+	config := MonitorConfig{
+		In:          writeMonitorInput(t, monitorTestEventLine(t)),
+		RewriteWith: rewriteSpecPath,
+	}
+	if err := config.RunE(cmd, []string{mainSpecPath}); err != nil {
+		t.Fatalf("MonitorConfig.RunE with roleless rewrite rule: %v", err)
 	}
 }
