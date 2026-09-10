@@ -65,11 +65,11 @@ func TestTranslationFromFiles(t *testing.T) {
 			require.NoError(t, err, "Failed to parse expected.spthy")
 
 			// Run decomposition on input
-			_, _, actualRules, err := cmd.ProcessRules(context.Background(), inputPath, "", true, nil)
+			processed, err := cmd.ProcessRules(context.Background(), inputPath, "", true, nil)
 			require.NoError(t, err, "Failed to process input rules")
 
 			// Compare rules
-			assertRulesEqual(t, expectedRules, actualRules)
+			assertRulesEqual(t, expectedRules, processed.Executable)
 		})
 	}
 }

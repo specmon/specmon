@@ -49,12 +49,12 @@ end
 		t.Fatalf("write test specification: %v", err)
 	}
 
-	_, selected, _, err := ProcessRules(context.Background(), specPath, "client", false, nil)
+	rules, err := ProcessRules(context.Background(), specPath, "client", false, nil)
 	if err != nil {
 		t.Fatalf("ProcessRules: %v", err)
 	}
-	if len(selected) != 1 || fmt.Sprint(selected[0].RHS) != "[Compute_(len(hash(m)))]" {
-		t.Fatalf("selected rules = %v", selected)
+	if len(rules.Selected) != 1 || fmt.Sprint(rules.Selected[0].RHS) != "[Compute_(len(hash(m)))]" {
+		t.Fatalf("selected rules = %v", rules.Selected)
 	}
 }
 

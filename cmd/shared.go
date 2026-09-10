@@ -37,11 +37,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// ProcessRules parses the rules from the given path and returns the original, the selected and the decomposed rules.
-func ProcessRules(ctx context.Context, specPath, role string, decompose bool, defines []string) ([]*rule.Rule, []*rule.Rule, []*rule.Rule, error) {
+// RuleSets contains each stage of rule processing.
+type RuleSets struct {
+	Parsed     []*rule.Rule
+	Selected   []*rule.Rule
+	Executable []*rule.Rule
+}
+
+// ProcessRules parses, selects, and optionally decomposes rules from the given path.
+func ProcessRules(ctx context.Context, specPath, role string, decompose bool, defines []string) (RuleSets, error) {
 	rules, err := parser.ParseFile(ctx, specPath, defines)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("cannot process rules: %w", err)
+		return RuleSets{}, fmt.Errorf("cannot process rules: %w", err)
 	}
 
 	selectedRules := rule.Rules(rules).FilterByRole(role).DropUnusedRHSFacts()
@@ -59,7 +66,11 @@ func ProcessRules(ctx context.Context, specPath, role string, decompose bool, de
 		decompRules = selectedRules
 	}
 
-	return rules, selectedRules, decompRules, nil
+	return RuleSets{
+		Parsed:     rules,
+		Selected:   selectedRules,
+		Executable: decompRules,
+	}, nil
 }
 
 // addFlagsFromStruct adds flags to the given command from the given struct.

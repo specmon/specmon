@@ -65,13 +65,13 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 
 	// Parse main monitoring rules
-	_, _, decompRules, err := ProcessRules(runCtx, specPath, role, decompose, defines)
+	rules, err := ProcessRules(runCtx, specPath, role, decompose, defines)
 	if err != nil {
 		return err
 	}
 
 	// Create the main monitor
-	m, err := monitor.NewMonitor(decompRules)
+	m, err := monitor.NewMonitor(rules.Executable)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
@@ -114,11 +114,11 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	if r.RewriteWith != "" {
 		// Rewrite rules translate instrumentation events independently of the
 		// monitored protocol role.
-		rewriteRules, _, _, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
+		rewriteRules, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
 		if err != nil {
 			return fmt.Errorf("cannot process rewrite rules: %w", err)
 		}
-		rewriter, err = monitor.NewMonitor(rewriteRules)
+		rewriter, err = monitor.NewMonitor(rewriteRules.Parsed)
 		if err != nil {
 			return fmt.Errorf("cannot create rewrite monitor: %w", err)
 		}

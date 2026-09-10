@@ -49,7 +49,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	decompose, _ := cmd.Root().Flags().GetBool("decompose")
 	defines, _ := cmd.Root().Flags().GetStringSlice("defines")
 
-	_, _, decompRules, err := ProcessRules(runCtx, specPath, role, decompose, defines)
+	rules, err := ProcessRules(runCtx, specPath, role, decompose, defines)
 	if err != nil {
 		return fmt.Errorf("cannot process rules: %w", err)
 	}
@@ -58,7 +58,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open input: %w", err)
 	}
-	m, err := monitor.NewMonitor(decompRules)
+	m, err := monitor.NewMonitor(rules.Executable)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}

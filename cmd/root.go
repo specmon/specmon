@@ -65,7 +65,7 @@ func DefaultRootConfig() *RootConfig {
 // The command parses a specification, and if requested,
 // performs a filtering and decomposition of the rules.
 func (c *RootConfig) RunE(ctx context.Context) error {
-	rules, selectedRules, decompRules, err := ProcessRules(ctx, c.SpecPath, c.Role, c.Decompose, c.Defines)
+	rules, err := ProcessRules(ctx, c.SpecPath, c.Role, c.Decompose, c.Defines)
 	if err != nil {
 		return err
 	}
@@ -76,16 +76,16 @@ func (c *RootConfig) RunE(ctx context.Context) error {
 
 	bold := color.New(color.Bold).SprintfFunc()
 
-	fmt.Printf("\n%s: %s (%d %s)\n", bold("Specification"), c.SpecPath, len(rules), utils.Pluralize("rule", len(rules)))
+	fmt.Printf("\n%s: %s (%d %s)\n", bold("Specification"), c.SpecPath, len(rules.Parsed), utils.Pluralize("rule", len(rules.Parsed)))
 	if c.Role != "" {
-		fmt.Printf("%s: %s (%d %s)\n", bold("Selected role"), c.Role, len(selectedRules), utils.Pluralize("rule", len(selectedRules)))
+		fmt.Printf("%s: %s (%d %s)\n", bold("Selected role"), c.Role, len(rules.Selected), utils.Pluralize("rule", len(rules.Selected)))
 	}
 	if c.Decompose {
-		fmt.Printf("%s: %d %s\n", bold("Decomp result"), len(decompRules), utils.Pluralize("rule", len(decompRules)))
+		fmt.Printf("%s: %d %s\n", bold("Decomp result"), len(rules.Executable), utils.Pluralize("rule", len(rules.Executable)))
 	}
 	fmt.Println()
 
-	for _, r := range decompRules {
+	for _, r := range rules.Executable {
 		fmt.Println(utils.Indent(r.String(), 2))
 	}
 
