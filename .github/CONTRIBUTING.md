@@ -55,6 +55,17 @@ This provides all dependencies and tools automatically.
    git commit -m "chore: Update Dependencies"
    ```
 
+   Keep the subject line at most 72 characters, not counting the
+   `(#123)` suffix that GitHub appends on squash merges. Write it in
+   imperative mood and capitalize the first word after the colon. Leave
+   a blank line after the subject and hard wrap the body at 72
+   characters. The same applies to squash commit messages edited on
+   GitHub.
+
+   `gitlint`, included in the Nix dev shell, checks these rules, and CI
+   runs it on the commits of every pull request. To check each commit
+   locally, install its hook with `gitlint install-hook`.
+
 4. Push to your fork and create a pull request against `develop`
 
 ## Code Quality

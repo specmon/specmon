@@ -1,0 +1,6 @@
+# See https://editorconfig.org.
+root = true
+
+# Commit messages are wrapped at 72 characters, see .github/CONTRIBUTING.md.
+[COMMIT_EDITMSG]
+max_line_length = 72
