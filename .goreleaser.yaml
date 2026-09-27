@@ -7,6 +7,7 @@ project_name: specmon
 before:
   hooks:
     - go mod tidy
+    - make third-party-licenses
 
 builds:
   - id: specmon
@@ -44,6 +45,7 @@ archives:
       - README.md
       - LICENSE
       - CHANGELOG.md
+      - THIRD_PARTY_LICENSES.txt
 
 checksum:
   name_template: "checksums.txt"
