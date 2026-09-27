@@ -62,6 +62,10 @@ This provides all dependencies and tools automatically.
    characters. The same applies to squash commit messages edited on
    GitHub.
 
+   `gitlint`, included in the Nix dev shell, checks these rules, and CI
+   runs it on the commits of every pull request. To check each commit
+   locally, install its hook with `gitlint install-hook`.
+
 4. Push to your fork and create a pull request against `develop`
 
 ## Code Quality

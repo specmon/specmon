@@ -1,0 +1,19 @@
+# Commit message rules, see .github/CONTRIBUTING.md.
+[general]
+contrib = contrib-title-conventional-commits
+ignore = body-is-missing, body-min-length
+regex-style-search = true
+
+# The first word after the colon is capitalized.
+[title-match-regex]
+regex = ^[a-z]+(\([^)]+\))?!?: [A-Z]
+
+[title-max-length]
+line-length = 72
+
+[body-max-line-length]
+line-length = 72
+
+# Trailers and URLs cannot be wrapped.
+[ignore-body-lines]
+regex = ^(Co-authored-by|Signed-off-by): |https?://

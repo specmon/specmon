@@ -18,6 +18,7 @@
 	  pkgs.gofumpt
 	  pkgs.gopls
 	  pkgs.golangci-lint
+	  pkgs.gitlint
 	  pkgs.nodejs
 	  pkgs.pnpm
         ];
