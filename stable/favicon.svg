@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 256 256">
+  <defs>
+    <style>
+      .st0 {
+        fill: #000;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .st0 {
+          fill: #fff;
+        }
+      }
+    </style>
+  </defs>
+  <path class="st0" d="M100,74h16v28h-16c-3.31,0-6-2.69-6-6v-16c0-3.31,2.69-6,6-6Z"/>
+  <path class="st0" d="M224,80v16c0,3.31-2.69,6-6,6h-94v-28h94c3.31,0,6,2.69,6,6Z"/>
+  <path class="st0" d="M116,153v28H38c-3.31,0-6-2.69-6-6v-16c0-3.31,2.69-6,6-6h78Z"/>
+  <path class="st0" d="M162,159v16c0,3.31-2.69,6-6,6h-32v-28h32c3.31,0,6,2.69,6,6Z"/>
+  <path class="st0" d="M69,114h47v28h-47c-3.31,0-6-2.69-6-6v-16c0-3.31,2.69-6,6-6Z"/>
+  <path class="st0" d="M193,120v16c0,3.31-2.69,6-6,6h-63v-28h63c3.31,0,6,2.69,6,6Z"/>
+  <rect class="st0" x="124" y="50" width="8" height="156"/>
+</svg>
