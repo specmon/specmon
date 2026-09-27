@@ -55,6 +55,13 @@ This provides all dependencies and tools automatically.
    git commit -m "chore: Update Dependencies"
    ```
 
+   Keep the subject line at most 72 characters, not counting the
+   `(#123)` suffix that GitHub appends on squash merges. Write it in
+   imperative mood and capitalize the first word after the colon. Leave
+   a blank line after the subject and hard wrap the body at 72
+   characters. The same applies to squash commit messages edited on
+   GitHub.
+
 4. Push to your fork and create a pull request against `develop`
 
 ## Code Quality
