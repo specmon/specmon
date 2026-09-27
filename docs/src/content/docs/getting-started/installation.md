@@ -203,4 +203,4 @@ Once SpecMon is installed, continue with:
 
 ## Contributing
 
-Interested in contributing to SpecMon? See the [Contributing Guidelines](https://github.com/specmon/specmon/blob/main/CONTRIBUTING.md) on GitHub.
+Interested in contributing to SpecMon? See the [Contributing Guidelines](https://github.com/specmon/specmon/blob/main/.github/CONTRIBUTING.md) on GitHub.
