@@ -2,6 +2,7 @@
   "name": "docs",
   "type": "module",
   "version": "0.0.1",
+  "packageManager": "pnpm@10.32.1",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
@@ -10,15 +11,15 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/sitemap": "^3.6.0",
-    "@astrojs/starlight": "^0.36.0",
-    "@astrojs/starlight-tailwind": "^4.0.1",
-    "@tailwindcss/vite": "^4.0.7",
-    "astro": "^5.6.1",
-    "sharp": "^0.34.2",
-    "tailwindcss": "^4.0.7"
+    "@astrojs/sitemap": "^3.7.4",
+    "@astrojs/starlight": "^0.42.4",
+    "@astrojs/starlight-tailwind": "^5.0.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "astro": "^7.3.5",
+    "sharp": "^0.35.5",
+    "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
-    "wrangler": "^4.56.0"
+    "wrangler": "^4.142.0"
   }
 }
