@@ -84,14 +84,16 @@ SpecMon uses [Release Please](https://github.com/googleapis/release-please) and
 
 1. Every push to `develop` triggers the Release Please workflow. It reads commit
    history since the last release and opens (or updates) a **Release PR** titled
-   `chore(release): Release vX.Y.Z`.
+   `chore(develop): Release X.Y.Z`.
 2. The Release PR contains an updated `CHANGELOG.md` and a bump to
    `.release-please-manifest.json`.
 3. When a maintainer merges the Release PR, Release Please creates a git tag
    (`vX.Y.Z`) and a GitHub Release with the changelog as the release body.
 4. The same workflow then runs GoReleaser on a macOS runner, which builds binaries
    for `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64`, attaches
-   the archives and `checksums.txt` to the release, and publishes it.
+   the archives and `checksums.txt` to the release, and publishes it. Each archive
+   contains `LICENSE` and `THIRD_PARTY_LICENSES.txt`, which
+   `make third-party-licenses` generates.
 
 ### What maintainers do
 
@@ -100,19 +102,24 @@ SpecMon uses [Release Please](https://github.com/googleapis/release-please) and
   - `fix:` → patch (0.1.0 → 0.1.1)
   - `feat:` → minor (0.1.0 → 0.2.0)
   - `feat!:` or `BREAKING CHANGE:` → minor while version < 1.0.0; major once ≥ 1.0.0
+- Before merging the Release PR, check the open Dependabot alerts in the Security
+  tab and resolve them on `develop`.
 - Review the Release PR's `CHANGELOG.md` diff before merging.
-- After the release is published, merge `develop → main` to update the stable branch.
+- After the release is published, fast-forward `main` to the release tag:
+  `git push upstream 'vX.Y.Z^{commit}:refs/heads/main'`.
 
 ### Do not edit manually
 
 `CHANGELOG.md` and `.release-please-manifest.json` are managed automatically by
-Release Please. Do not edit them by hand.
+Release Please. Do not edit them by hand. The one exception is the release date,
+which Release Please sets when it generates the Release PR: if the PR is merged
+on a later day, correct the date in `CHANGELOG.md` and in the PR body.
 
 ### Version in dev builds
 
 `specmon --version` prints `dev` for binaries built with `go build .`.
-Release builds print the full semver tag (e.g., `v0.2.0`) via GoReleaser ldflags.
+Release builds print the release version (e.g., `0.3.0`) via GoReleaser ldflags.
 
 ## Need Help?
 
-If you have a question or need help, please [open a discussion](https://github.com/specmon/specmon-go/discussions) instead of an issue. This helps us keep the issue tracker focused on bugs and feature requests.
+If you have a question or need help, please [open a discussion](https://github.com/specmon/specmon/discussions) instead of an issue. This helps us keep the issue tracker focused on bugs and feature requests.
