@@ -296,6 +296,36 @@ func TestEvaluate(t *testing.T) {
 			false,
 		},
 		{
+			// evaluate(xor(243, 15)) | 252
+			term.NewFunction(term.XorFunctionName, []term.Term{
+				term.NewConstant[int](243),
+				term.NewConstant[int](15),
+			}),
+			term.NewConstant[int](252),
+			false,
+		},
+		{
+			// evaluate(xor('0xf3', 15)) | 0xfc
+			term.NewFunction(term.XorFunctionName, []term.Term{
+				term.NewConstant[[]byte]([]byte{0xf3}),
+				term.NewConstant[int](15),
+			}),
+			term.NewConstant[[]byte]([]byte{0xfc}),
+			false,
+		},
+		{
+			// evaluate(xor(xor('0xaa', '0x55'), '0xff')) | 0x00
+			term.NewFunction(term.XorFunctionName, []term.Term{
+				term.NewFunction(term.XorFunctionName, []term.Term{
+					term.NewConstant[[]byte]([]byte{0xaa}),
+					term.NewConstant[int](0x55),
+				}),
+				term.NewConstant[int](0xff),
+			}),
+			term.NewConstant[[]byte]([]byte{0x00}),
+			false,
+		},
+		{
 			// ekI = cat( byte(and('0x3f', '248'), '1'), byte('0xbfe12c4f8e0d10f3f361ae081089edbef9a6953e8846269b1218efaf62a1', '30), byte(or(and('0x30', '127'), '64'), '1'))
 			term.NewFunction(term.CatFunctionName, []term.Term{
 				term.NewFunction(string(term.FormatByteType), []term.Term{
