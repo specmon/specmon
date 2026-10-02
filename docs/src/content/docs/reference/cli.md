@@ -154,11 +154,11 @@ Decomp result: 23 rules
 
 **`--pid, -P <pid>`**
 - **Type**: integer
-- **Description**: Terminate this positive PID after a specification violation. When the flag is omitted, SpecMon does not terminate a process. Zero and negative values are rejected.
+- **Description**: Terminate this positive PID with `SIGKILL` after a specification violation. When the flag is omitted, SpecMon does not terminate a process. Zero and negative values are rejected.
 
 **`--on-violation <path>`**
 - **Type**: string
-- **Description**: Run this executable after a specification violation. The path is executed directly and is not interpreted by a shell.
+- **Description**: Run this executable after a specification violation. The path is executed directly and is not interpreted by a shell; a name without a slash is looked up in `PATH`.
 
 **`--on-violation-timeout <duration>`**
 - **Type**: duration
@@ -197,15 +197,20 @@ Use `--rewrite-with` to apply rewrite rules before monitoring. Pre-trace events 
 specmon monitor --rewrite-with rewrite.spthy --pre-trace init.json --in live.json protocol.spthy
 ```
 
-Use the same `--role` and `--defines` for both the rewrite and monitoring rules.
+The rewrite rules are used as parsed: `--defines` applies to them, while
+`--role` and `--decompose` apply only to the monitoring rules. Both
+specifications are loaded before any event is processed.
 
 ### Violation reactions
 
 `--on-violation` runs only when the main monitor reports a genuine
 specification violation. It does not run for malformed input, transport
-failures, rewrite failures, evaluation failures, or cancellation. The hook
-path names one executable or script. SpecMon does not invoke a shell or parse
-arguments from the path, so scripts need a valid shebang.
+failures, rewrite failures, or cancellation, nor when an action or conclusion
+of an applied rule cannot be evaluated. A trigger, hint or premise whose
+evaluation fails does not match; if no other rule accepts the event, that is a
+violation. The hook names one executable or script, as a path or as a name
+without a slash that is looked up in `PATH`. SpecMon does not invoke a shell or
+parse arguments from it, so scripts need a valid shebang.
 
 The hook receives one newline terminated JSON object on stdin. Both hook stdout
 and hook stderr are forwarded to SpecMon stderr. Payload schema version 1 is:
@@ -266,11 +271,19 @@ termination. A PID termination failure is handled the same way. The command
 returns the original violation with a nonzero exit status after completing the
 bounded reaction sequence; its error names the index and the term of the
 rejected event, for example `Error: monitor violation at event 4: no applicable
-rule found <done(), <>>`. A signal that arrives after the violation is
+rule found <done(), <>>`. A first signal that arrives after the violation is
 captured does not cancel that sequence; only `--on-violation-timeout` limits
 the hook. After the hook exits, SpecMon waits at most one second for its
 standard streams, which a process that the hook starts in the background may
 keep open.
+
+### Signals
+
+On a first `SIGINT` or `SIGTERM`, `monitor` and `rewrite` stop reading input,
+print `signal received, exiting` on stderr, and exit with status 0; `monitor`
+also prints its statistics line. A second signal ends SpecMon at once, also
+while it waits for a violation hook or for a blocked output; the PID is then not
+terminated and no error line is printed.
 
 ### Rewrite command: `specmon rewrite`
 
@@ -316,6 +329,11 @@ specmon rewrite --in raw.json --out clean.json --json transform.spthy
 # Rewrite with role selection
 specmon --role preprocessor rewrite --json transform.spthy < events.json
 ```
+
+If no rewrite rule accepts an event, the command stops with an error that names
+the index and the term of the rejected event, for example `Error: rewrite
+events: rewrite violation at event 2: no applicable rule found <zzz(), <>>`.
+The events emitted before it are written first.
 
 ## Input/output formats
 
