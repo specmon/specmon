@@ -306,59 +306,41 @@ func (r *Rule) ExpandFormats(b *term.Binding) *Rule {
 }
 
 func (r *Rule) ReplaceFormats() (*Rule, error) {
-	s := &Rule{
-		Name:  r.Name,
-		LHS:   make([]*Fact, len(r.LHS)),
-		Act:   make([]*Fact, len(r.Act)),
-		RHS:   make([]*Fact, len(r.RHS)),
-		Attrs: maps.Clone(r.Attrs),
+	s := &Rule{Name: r.Name, Attrs: maps.Clone(r.Attrs)}
+	var triggers, hints []term.Term
+	var err error
+	if s.LHS, err = replaceEach(r.LHS, (*Fact).ReplaceFormats); err != nil {
+		return nil, fmt.Errorf("replace formats in rule %s LHS: %w", r.Name, err)
 	}
-
-	for i, f := range r.LHS {
-		var err error
-		s.LHS[i], err = f.ReplaceFormats()
-		if err != nil {
-			return nil, fmt.Errorf("replace formats in rule %s LHS: %w", r.Name, err)
-		}
+	if s.Act, err = replaceEach(r.Act, (*Fact).ReplaceFormats); err != nil {
+		return nil, fmt.Errorf("replace formats in rule %s actions: %w", r.Name, err)
 	}
-
-	for i, f := range r.Act {
-		var err error
-		s.Act[i], err = f.ReplaceFormats()
-		if err != nil {
-			return nil, fmt.Errorf("replace formats in rule %s actions: %w", r.Name, err)
-		}
+	if s.RHS, err = replaceEach(r.RHS, (*Fact).ReplaceFormats); err != nil {
+		return nil, fmt.Errorf("replace formats in rule %s RHS: %w", r.Name, err)
 	}
-
-	for i, f := range r.RHS {
-		var err error
-		s.RHS[i], err = f.ReplaceFormats()
-		if err != nil {
-			return nil, fmt.Errorf("replace formats in rule %s RHS: %w", r.Name, err)
-		}
+	if triggers, err = replaceEach(r.Triggers(), term.ReplaceFormats); err != nil {
+		return nil, fmt.Errorf("replace formats in rule %s triggers: %w", r.Name, err)
 	}
-
-	triggers := make([]term.Term, len(r.Triggers()))
-	for i, trigger := range r.Triggers() {
-		var err error
-		triggers[i], err = term.ReplaceFormats(trigger)
-		if err != nil {
-			return nil, fmt.Errorf("replace formats in rule %s triggers: %w", r.Name, err)
-		}
+	if hints, err = replaceEach(r.Hints(), term.ReplaceFormats); err != nil {
+		return nil, fmt.Errorf("replace formats in rule %s hints: %w", r.Name, err)
 	}
 	s.Attrs[TriggerAttributeName] = TermAttribute{triggers}
-
-	hints := make([]term.Term, len(r.Hints()))
-	for i, hint := range r.Hints() {
-		var err error
-		hints[i], err = term.ReplaceFormats(hint)
-		if err != nil {
-			return nil, fmt.Errorf("replace formats in rule %s hints: %w", r.Name, err)
-		}
-	}
 	s.Attrs[HintAttributeName] = TermAttribute{hints}
 
 	return s, nil
+}
+
+// replaceEach returns the results of replace for each item, or its first
+// error.
+func replaceEach[T any](items []T, replace func(T) (T, error)) ([]T, error) {
+	replaced := make([]T, len(items))
+	for i, item := range items {
+		var err error
+		if replaced[i], err = replace(item); err != nil {
+			return nil, err
+		}
+	}
+	return replaced, nil
 }
 
 type Rules []*Rule
