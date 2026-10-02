@@ -451,6 +451,53 @@ func TestRewriteCallbackErrorClosesBlockingInput(t *testing.T) {
 	}
 }
 
+func TestRewriteHandlesEveryOutputBeforeAViolation(t *testing.T) {
+	t.Parallel()
+
+	value := term.NewVariable(runnerValueName)
+	r := &rule.Rule{
+		Name: runnerRuleName,
+		Act: []*rule.Fact{
+			rule.NewFact(monitor.RewriteEventName, []term.Term{
+				runnerEvent(runnerOutputEventName, value),
+			}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{
+			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
+				runnerEvent(runnerInputEventName, value),
+			}},
+		},
+	}
+	m, err := monitor.NewMonitor([]*rule.Rule{r})
+	if err != nil {
+		t.Fatalf("NewMonitor: %v", err)
+	}
+	const accepted = 200
+	var input strings.Builder
+	for range accepted {
+		input.Write(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant("v"))))
+	}
+	input.Write(runnerEventLine(t, runnerEvent(runnerOutputEventName, term.NewConstant("v"))))
+
+	// The first output is handled late, so that the rewriter has processed
+	// every event and the other outputs and the violation are pending
+	// together.
+	outputs := 0
+	err = m.Rewrite(context.Background(), io.NopCloser(strings.NewReader(input.String())), func(*monitor.TimedEvent) error {
+		if outputs == 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		outputs++
+		return nil
+	})
+	if !errors.Is(err, monitor.ErrNoApplicableRule) {
+		t.Fatalf("Rewrite error = %v, want the violation", err)
+	}
+	if outputs != accepted {
+		t.Fatalf("handled %d outputs, want %d", outputs, accepted)
+	}
+}
+
 func TestRunPipelineSettlesAfterDownstreamViolation(t *testing.T) {
 	t.Parallel()
 

@@ -112,6 +112,13 @@ func runMonitor(
 	// pipe or terminal does not return when the input is closed, and the
 	// parser ends on its own when its read returns.
 	for outputs != nil || consumed != nil || processTerminal != nil || (parseTerminal != nil && !stopping) {
+		// The result of processing is read once every output and consumed
+		// event is handled. The processor closes both before it sends its
+		// result, so that the events before a violation are not dropped.
+		terminal := processTerminal
+		if outputs != nil || consumed != nil {
+			terminal = nil
+		}
 		select {
 		case <-callerDone:
 			callerErr = ctx.Err()
@@ -133,7 +140,7 @@ func runMonitor(
 			if !stopping && onConsumed != nil {
 				recordError(onConsumed(event))
 			}
-		case result, ok := <-processTerminal:
+		case result, ok := <-terminal:
 			if !ok {
 				processTerminal = nil
 				continue
