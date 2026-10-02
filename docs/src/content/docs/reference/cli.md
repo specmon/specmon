@@ -264,7 +264,9 @@ termination. A hook startup failure, nonzero exit, or timeout is reported on
 stderr but does not replace the original monitor violation or skip PID
 termination. A PID termination failure is handled the same way. The command
 returns the original violation with a nonzero exit status after completing the
-bounded reaction sequence. A signal that arrives after the violation is
+bounded reaction sequence; its error names the index and the term of the
+rejected event, for example `Error: monitor violation at event 4: no applicable
+rule found <done(), <>>`. A signal that arrives after the violation is
 captured does not cancel that sequence; only `--on-violation-timeout` limits
 the hook. After the hook exits, SpecMon waits at most one second for its
 standard streams, which a process that the hook starts in the background may

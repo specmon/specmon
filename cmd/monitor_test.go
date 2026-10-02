@@ -209,3 +209,148 @@ end
 		t.Fatalf("MonitorConfig.RunE with roleless rewrite rule: %v", err)
 	}
 }
+
+const (
+	monitorTestOtherEventName   = "monitorTestOtherEvent"
+	monitorTestUnknownEventName = "monitorTestUnknownEvent"
+)
+
+// monitorEventLine returns a trace line with the event <name(), <>>.
+func monitorEventLine(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := json.Marshal(&monitor.TimedEvent{Time: time.Now().UnixNano(), Event: monitorEvent(name)})
+	if err != nil {
+		t.Fatalf("marshal monitor event: %v", err)
+	}
+	return append(b, '\n')
+}
+
+func monitorEvent(name string) *term.Function {
+	return term.NewFunction(term.PairFunctionName, []term.Term{
+		term.NewFunction(name, nil),
+		term.NewFunction(term.PairFunctionName, nil),
+	})
+}
+
+// writeMonitorSpec writes a theory with the given rules.
+func writeMonitorSpec(t *testing.T, rules string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "spec.spthy")
+	if err := os.WriteFile(path, []byte("theory MonitorTest\nbegin\n\n"+rules+"\nend\n"), 0o600); err != nil {
+		t.Fatalf("write specification: %v", err)
+	}
+	return path
+}
+
+// acceptingSpec accepts the events monitorTestEvent and nothing else.
+const acceptingSpec = `rule Accept [trigger=[<monitorTestEvent(), r>]]:
+  [ ] --> [ ]
+`
+
+func TestMonitorViolationErrorNamesEvent(t *testing.T) {
+	specPath := writeMonitorSpec(t, acceptingSpec)
+	trace := append(monitorEventLine(t, monitorTestEventName), monitorEventLine(t, monitorTestOtherEventName)...)
+	want := "at event 2: no applicable rule found " + monitorEvent(monitorTestOtherEventName).String()
+
+	config := MonitorConfig{In: writeMonitorInput(t, trace)}
+	err := config.RunE(monitorTestCommand(), []string{specPath})
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || err.Error() != "monitor violation "+want {
+		t.Fatalf("RunE error = %v, want %q", err, "monitor violation "+want)
+	}
+
+	config = MonitorConfig{In: writeMonitorInput(t, nil), PreTrace: writeMonitorInput(t, trace)}
+	err = config.RunE(monitorTestCommand(), []string{specPath})
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || err.Error() != "monitor pre-trace violation "+want {
+		t.Fatalf("RunE error = %v, want %q", err, "monitor pre-trace violation "+want)
+	}
+}
+
+func TestMonitorOpensInputBeforePreTrace(t *testing.T) {
+	specPath := writeMonitorSpec(t, acceptingSpec)
+	config := MonitorConfig{
+		In:       filepath.Join(t.TempDir(), "missing.jsonl"),
+		PreTrace: writeMonitorInput(t, monitorEventLine(t, monitorTestOtherEventName)),
+	}
+	err := config.RunE(monitorTestCommand(), []string{specPath})
+	if err == nil || !strings.Contains(err.Error(), "cannot open input") {
+		t.Fatalf("RunE error = %v, want the input opened before the pre-trace runs", err)
+	}
+}
+
+func TestMonitorPreTraceViolationRunsReaction(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	t.Setenv(testPayloadPathEnv, payloadPath)
+	var kills atomic.Int32
+	config := MonitorConfig{
+		In:                 writeMonitorInput(t, nil),
+		PreTrace:           writeMonitorInput(t, append(monitorEventLine(t, monitorTestEventName), monitorEventLine(t, monitorTestOtherEventName)...)),
+		Pid:                123,
+		OnViolation:        writeViolationHook(t, "cat > \"$"+testPayloadPathEnv+"\"\n"),
+		OnViolationTimeout: testHookTimeout,
+		terminateProcess: func(int) error {
+			kills.Add(1)
+			return nil
+		},
+	}
+	err := config.RunE(monitorTestCommand(), []string{writeMonitorSpec(t, acceptingSpec)})
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || !strings.HasPrefix(err.Error(), "monitor pre-trace violation at event 2:") {
+		t.Fatalf("RunE error = %v, want the pre-trace violation at event 2", err)
+	}
+	payload := readMonitorHookPayload(t, payloadPath)
+	if payload.EventIndex != 2 || kills.Load() != 1 {
+		t.Fatalf("hook payload event_index = %d, kills = %d; want 2 and 1", payload.EventIndex, kills.Load())
+	}
+}
+
+// TestMonitorRewriteViolationCountsRewrittenEvents checks that the index of
+// a violation with --rewrite-with counts the events that the rewriter
+// emits, not the raw events.
+func TestMonitorRewriteViolationCountsRewrittenEvents(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payload.json")
+	t.Setenv(testPayloadPathEnv, payloadPath)
+	rewritePath := filepath.Join(t.TempDir(), "rewrite.spthy")
+	rewrite := `theory MonitorRewrite
+begin
+
+rule Twice [trigger=[<monitorTestEvent(), r>]]:
+  [ ] --[ PPEvent(<monitorTestRewrittenEvent(), r>), PPEvent(<monitorTestRewrittenEvent(), r>) ]-> [ ]
+
+rule Unknown [trigger=[<monitorTestOtherEvent(), r>]]:
+  [ ] --[ PPEvent(<monitorTestUnknownEvent(), r>) ]-> [ ]
+
+end
+`
+	if err := os.WriteFile(rewritePath, []byte(rewrite), 0o600); err != nil {
+		t.Fatalf("write rewrite theory: %v", err)
+	}
+	config := MonitorConfig{
+		In:                 writeMonitorInput(t, append(monitorEventLine(t, monitorTestEventName), monitorEventLine(t, monitorTestOtherEventName)...)),
+		RewriteWith:        rewritePath,
+		OnViolation:        writeViolationHook(t, "cat > \"$"+testPayloadPathEnv+"\"\n"),
+		OnViolationTimeout: testHookTimeout,
+	}
+	spec := writeMonitorSpec(t, `rule Accept [trigger=[<monitorTestRewrittenEvent(), r>]]:
+  [ ] --> [ ]
+`)
+	err := config.RunE(monitorTestCommand(), []string{spec})
+	want := "monitor violation at event 3: no applicable rule found " + monitorEvent(monitorTestUnknownEventName).String()
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || err.Error() != want {
+		t.Fatalf("RunE error = %v, want %q", err, want)
+	}
+	if payload := readMonitorHookPayload(t, payloadPath); payload.EventIndex != 3 {
+		t.Fatalf("hook payload event_index = %d, want 3", payload.EventIndex)
+	}
+}
+
+func readMonitorHookPayload(t *testing.T, path string) violationHookPayload {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read hook payload: %v", err)
+	}
+	var payload violationHookPayload
+	if err := json.Unmarshal(b, &payload); err != nil {
+		t.Fatalf("unmarshal hook payload: %v", err)
+	}
+	return payload
+}

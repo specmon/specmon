@@ -22,8 +22,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -63,6 +65,8 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// After the first signal, a second one ends the process at once.
+	context.AfterFunc(runCtx, stop)
 
 	specPath := args[0]
 
@@ -75,6 +79,16 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// The input is opened before the pre-trace is processed, so that a
+	// client can connect to a listening socket in the meantime. The
+	// monitor closes it; closing it again on an early return is harmless.
+	eventSource, err := openInputReader(r.In)
+	if err != nil {
+		return fmt.Errorf("cannot open input: %w", err)
+	}
+	input := &closeOnce{ReadCloser: eventSource}
+	defer input.Close()
 
 	// Create the main monitor
 	m, err := monitor.NewMonitor(rules.Executable)
@@ -102,7 +116,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		if violation != nil {
 			fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON())
 			r.handleViolation(runCtx, cmd, violation, specPath, role, terminateProcess)
-			return fmt.Errorf("monitor pre-trace violation: %w", violation.Err)
+			return violationError("monitor pre-trace violation", violation)
 		}
 		if runErr != nil {
 			if errors.Is(runErr, context.Canceled) && cmd.Context().Err() == nil {
@@ -128,17 +142,12 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	eventSource, err := openInputReader(r.In)
-	if err != nil {
-		return fmt.Errorf("cannot open input: %w", err)
-	}
-
 	var violation *monitor.ViolationInfo
 	var runErr error
 	if rewriter == nil {
-		violation, runErr = m.Run(runCtx, eventSource, onConsumed)
+		violation, runErr = m.Run(runCtx, input, onConsumed)
 	} else {
-		violation, runErr = monitor.RunPipeline(runCtx, rewriter, m, eventSource, onConsumed)
+		violation, runErr = monitor.RunPipeline(runCtx, rewriter, m, input, onConsumed)
 	}
 
 	if _, err := fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON()); err != nil && violation == nil && runErr == nil {
@@ -146,7 +155,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	}
 	if violation != nil {
 		r.handleViolation(runCtx, cmd, violation, specPath, role, terminateProcess)
-		return fmt.Errorf("monitor violation: %w", violation.Err)
+		return violationError("monitor violation", violation)
 	}
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) && cmd.Context().Err() == nil {
@@ -180,6 +189,29 @@ func (r *MonitorConfig) handleViolation(
 			fmt.Fprintf(cmd.ErrOrStderr(), "failed to kill process: %v\n", err)
 		}
 	}
+}
+
+// violationError is the error with which a violation ends the command. It
+// names the rejected event and its index.
+func violationError(kind string, violation *monitor.ViolationInfo) error {
+	if violation.TimedEvent == nil || violation.TimedEvent.Event == nil {
+		return fmt.Errorf("%s: %w", kind, violation.Err)
+	}
+	return fmt.Errorf("%s at event %d: %w %s", kind, violation.EventIndex, violation.Err, violation.TimedEvent.Event)
+}
+
+// closeOnce closes its reader at most once.
+type closeOnce struct {
+	io.ReadCloser
+	once sync.Once
+	err  error
+}
+
+func (c *closeOnce) Close() error {
+	c.once.Do(func() {
+		c.err = c.ReadCloser.Close()
+	})
+	return c.err
 }
 
 // NewMonitorCmd creates a new command for the monitor subcommand.
