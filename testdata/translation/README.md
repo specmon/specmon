@@ -24,32 +24,20 @@ testdata/translation/
 
 ### How to Generate Expected Output
 
-To see what the actual decomposition produces for your input, you can:
+The test runs each input through `cmd.ProcessRules` with decomposition and without a role, as the root command does. To see the result for your input, run:
 
-1. Temporarily add a debug test in `rule/translation_integration_test.go`:
-
-```go
-func TestDebugNewCase(t *testing.T) {
-    inputFile := "../testdata/translation/your_test_case/input.spthy"
-    _, _, decompRules, err := cmd.ProcessRules(inputFile, "", true, nil)
-    require.NoError(t, err)
-    
-    fmt.Println("Decomposed rules:")
-    for i, rule := range decompRules {
-        fmt.Printf("Rule %d: %s\n", i, rule.String())
-        fmt.Println("---")
-    }
-}
+```bash
+go run . testdata/translation/your_test_case/input.spthy
 ```
 
-2. Run the test: `go test -v ./rule -run TestDebugNewCase`
-3. Copy the output to create your `expected.spthy` file
-4. Remove the debug test
+Copy the printed rules into `expected.spthy` without their indentation, between the `theory`, `begin` and `end` lines of the input.
+
+Before decomposition, a conclusion that no premise consumes is dropped, and a function call in it stays as a `Compute_(...)` fact. To keep a conclusion in the expected rules, let a premise consume it.
 
 ## Existing Test Cases
 
 - **simple_function**: Tests decomposition of nested function calls `len(hash(m))`
-- **no_decomposition**: Tests rules that don't need decomposition
+- **no_decomposition**: Tests that a rule without function applications is not decomposed; no rule consumes its conclusion, so the conclusion is dropped
 - **no_decomp_attribute**: Tests rules with the `[no-decomp]` attribute
 - **existing_triggers**: Tests that rules with existing triggers should NOT be decomposed
 - **existing_hints**: Tests that rules with existing hints should NOT be decomposed

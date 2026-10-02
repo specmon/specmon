@@ -73,6 +73,10 @@ Two computations can happen independently (`h($m)` and `senc(~k, $m)`), and `h(s
 Because `h($m)` and `senc(~k, $m)` can occur in either order, the monitor would otherwise need to explore many interleavings. **Hints** let the monitor look ahead at the incoming event and choose the matching path, avoiding an exponential blowup in the number of rule variants.
 :::
 
+### Conclusions that no rule consumes
+
+After role selection, and before decomposition, SpecMon drops each conclusion that no premise of the selected rules consumes, that is, no premise with the same fact name and number of arguments. This also happens with `--decompose=false`. A function call in a dropped conclusion stays as a `Compute_(...)` fact, so the call is still matched and evaluated. A fact whose name ends in `_` is evaluated but never stored.
+
 ## `role` — Filter rules by protocol role
 
 The `role` attribute restricts rules to specific protocol participants:
