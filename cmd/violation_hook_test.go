@@ -20,7 +20,6 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +109,7 @@ printf 'hook stderr\n' >&2
 	payload := newViolationHookPayload(testViolationInfo(), "model.spthy", "client", 1234, "rewrite.spthy")
 
 	var output bytes.Buffer
-	if err := executeViolationHook(context.Background(), hook, testHookTimeout, payload, &output); err != nil {
+	if err := executeViolationHook(hook, testHookTimeout, payload, &output); err != nil {
 		t.Fatalf("executeViolationHook: %v", err)
 	}
 	if got := output.String(); !strings.Contains(got, "hook stdout\n") || !strings.Contains(got, "hook stderr\n") {
@@ -186,52 +185,11 @@ func TestViolationHookEnvironmentRemovesStalePID(t *testing.T) {
 	}
 }
 
-func TestExecuteViolationHookFailureKinds(t *testing.T) {
-	exitHook := writeViolationHook(t, "exit 7\n")
-	timeoutHook := writeViolationHook(t, "exec /bin/sleep 5\n")
-	payload := newViolationHookPayload(testViolationInfo(), "model.spthy", "", 0, "")
-
-	for _, test := range []struct {
-		name     string
-		path     string
-		timeout  time.Duration
-		wantKind violationHookErrorKind
-	}{
-		{name: "start", path: filepath.Join(t.TempDir(), "missing"), timeout: testHookTimeout, wantKind: violationHookStartError},
-		{name: "exit", path: exitHook, timeout: testHookTimeout, wantKind: violationHookExitError},
-		{name: "timeout", path: timeoutHook, timeout: 20 * time.Millisecond, wantKind: violationHookTimeoutError},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := executeViolationHook(context.Background(), test.path, test.timeout, payload, &bytes.Buffer{})
-			var hookErr *violationHookError
-			if !errors.As(err, &hookErr) || hookErr.kind != test.wantKind {
-				t.Fatalf("executeViolationHook error = %v, want kind %d", err, test.wantKind)
-			}
-		})
-	}
-}
-
-func TestExecuteViolationHookIgnoresParentCancellation(t *testing.T) {
-	markerPath := filepath.Join(t.TempDir(), "marker")
-	t.Setenv(testMarkerPathEnv, markerPath)
-	hook := writeViolationHook(t, fmt.Sprintf("printf 'ran' > \"$%s\"\n", testMarkerPathEnv))
-	payload := newViolationHookPayload(testViolationInfo(), "model.spthy", "", 0, "")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := executeViolationHook(ctx, hook, 0, payload, &bytes.Buffer{}); err != nil {
-		t.Fatalf("executeViolationHook with canceled parent: %v", err)
-	}
-	if _, err := os.Stat(markerPath); err != nil {
-		t.Fatalf("hook did not run after parent cancellation: %v", err)
-	}
-}
-
 func TestExecuteViolationHookDoesNotWaitForInheritedStreams(t *testing.T) {
 	hook := writeViolationHook(t, "sleep 10 &\n")
 	start := time.Now()
 	var output bytes.Buffer
-	if err := executeViolationHook(context.Background(), hook, testHookTimeout, violationHookPayload{}, &output); err != nil {
+	if err := executeViolationHook(hook, testHookTimeout, violationHookPayload{}, &output); err != nil {
 		t.Fatalf("executeViolationHook: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -362,7 +320,7 @@ func TestViolationHookFailureDoesNotSkipPIDTermination(t *testing.T) {
 				OnViolationTimeout: test.timeout,
 			}
 			cmd := monitorTestCommand()
-			config.handleViolation(context.Background(), cmd, testViolationInfo(), "model.spthy", "", func(pid int) error {
+			config.handleViolation(cmd, testViolationInfo(), "model.spthy", "", func(pid int) error {
 				if pid != 123 {
 					t.Fatalf("terminate process called with pid %d", pid)
 				}

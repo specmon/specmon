@@ -174,9 +174,8 @@ func (mr *multiplexedReader) acceptConnections() {
 	for {
 		conn, err := mr.listener.Accept()
 		if err != nil {
-			if !mr.clients.isClosed() {
-				_ = mr.writer.CloseWithError(fmt.Errorf("accept connection: %w", err))
-			}
+			// After Close, the pipe is closed and this has no effect.
+			_ = mr.writer.CloseWithError(fmt.Errorf("accept connection: %w", err))
 			return
 		}
 
@@ -245,12 +244,6 @@ func (clients *clientConnections) remove(conn net.Conn) {
 	clients.Lock()
 	defer clients.Unlock()
 	delete(clients.active, conn)
-}
-
-func (clients *clientConnections) isClosed() bool {
-	clients.Lock()
-	defer clients.Unlock()
-	return clients.closed
 }
 
 func (clients *clientConnections) closeAll() bool {

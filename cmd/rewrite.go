@@ -58,6 +58,9 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open input: %w", err)
 	}
+	// The rewriter closes the input; closing it again on an early return
+	// is harmless.
+	defer eventSource.Close()
 	m, err := monitor.NewMonitor(rules.Executable)
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
@@ -65,7 +68,6 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {
-		eventSource.Close()
 		return fmt.Errorf("cannot open out file: %w", err)
 	}
 

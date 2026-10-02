@@ -27,6 +27,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,27 +68,6 @@ type violationHookPayload struct {
 	Stats         monitor.StatsSummary `json:"stats"`
 }
 
-type violationHookErrorKind int
-
-const (
-	violationHookStartError violationHookErrorKind = iota
-	violationHookExitError
-	violationHookTimeoutError
-)
-
-type violationHookError struct {
-	kind violationHookErrorKind
-	err  error
-}
-
-func (e *violationHookError) Error() string {
-	return e.err.Error()
-}
-
-func (e *violationHookError) Unwrap() error {
-	return e.err
-}
-
 func newViolationHookPayload(
 	violation *monitor.ViolationInfo,
 	specPath string,
@@ -95,32 +75,24 @@ func newViolationHookPayload(
 	pid int,
 	rewriteWith string,
 ) violationHookPayload {
-	payload := violationHookPayload{
+	return violationHookPayload{
 		SchemaVersion: violationHookSchemaVersion,
 		Kind:          violationHookKind,
 		ErrorKind:     violation.ErrorKind,
 		Error:         violation.Err.Error(),
 		EventIndex:    violation.EventIndex,
+		Time:          &violation.TimedEvent.Time,
+		Event:         violation.TimedEvent.Event,
+		EventTerm:     violation.TimedEvent.Event.String(),
 		SpecPath:      specPath,
 		Role:          role,
+		PID:           pid,
 		RewriteWith:   rewriteWith,
 		Stats:         violation.Stats,
 	}
-	if pid > 0 {
-		payload.PID = pid
-	}
-	if violation.TimedEvent != nil {
-		payload.Time = &violation.TimedEvent.Time
-		payload.Event = violation.TimedEvent.Event
-		if payload.Event != nil {
-			payload.EventTerm = payload.Event.String()
-		}
-	}
-	return payload
 }
 
 func executeViolationHook(
-	ctx context.Context,
 	path string,
 	timeout time.Duration,
 	payload violationHookPayload,
@@ -128,11 +100,11 @@ func executeViolationHook(
 ) error {
 	var input bytes.Buffer
 	if err := json.NewEncoder(&input).Encode(payload); err != nil {
-		return &violationHookError{kind: violationHookStartError, err: fmt.Errorf("encode payload: %w", err)}
+		return fmt.Errorf("violation hook failed to start: encode payload: %w", err)
 	}
 
-	hookCtx := context.WithoutCancel(ctx)
-	cancel := func() {}
+	// The hook runs to its end or its timeout, also after a signal.
+	hookCtx, cancel := context.Background(), context.CancelFunc(func() {})
 	if timeout > 0 {
 		hookCtx, cancel = context.WithTimeout(hookCtx, timeout)
 	}
@@ -145,7 +117,7 @@ func executeViolationHook(
 	command.Env = violationHookEnvironment(os.Environ(), payload)
 	command.WaitDelay = violationHookWaitDelay
 	if err := command.Start(); err != nil {
-		return &violationHookError{kind: violationHookStartError, err: err}
+		return fmt.Errorf("violation hook failed to start: %w", err)
 	}
 	if err := command.Wait(); err != nil {
 		// The hook succeeded; only a process it left behind kept its
@@ -154,28 +126,19 @@ func executeViolationHook(
 			return nil
 		}
 		if errors.Is(hookCtx.Err(), context.DeadlineExceeded) {
-			return &violationHookError{kind: violationHookTimeoutError, err: err}
+			return fmt.Errorf("violation hook timed out after %s: %w", timeout, err)
 		}
-		return &violationHookError{kind: violationHookExitError, err: err}
+		return fmt.Errorf("violation hook exited with an error: %w", err)
 	}
 	return nil
 }
 
 func violationHookEnvironment(base []string, payload violationHookPayload) []string {
-	environment := make([]string, 0, len(base)+4)
-	for _, entry := range base {
-		key, _, _ := strings.Cut(entry, "=")
-		switch key {
-		case violationHookKindEnv,
-			violationHookErrorKindEnv,
-			violationHookEventIndexEnv,
-			violationHookPIDEnv:
-			continue
-		default:
-			environment = append(environment, entry)
-		}
-	}
-
+	// exec uses the last value of a repeated key, so only an inherited PID
+	// that the payload does not replace must be removed.
+	environment := slices.DeleteFunc(slices.Clone(base), func(entry string) bool {
+		return strings.HasPrefix(entry, violationHookPIDEnv+"=")
+	})
 	environment = append(environment,
 		violationHookKindEnv+"="+violationHookKind,
 		violationHookErrorKindEnv+"="+payload.ErrorKind,
@@ -185,21 +148,4 @@ func violationHookEnvironment(base []string, payload violationHookPayload) []str
 		environment = append(environment, violationHookPIDEnv+"="+strconv.Itoa(payload.PID))
 	}
 	return environment
-}
-
-func reportViolationHookError(output io.Writer, timeout time.Duration, err error) {
-	var hookErr *violationHookError
-	if !errors.As(err, &hookErr) {
-		fmt.Fprintf(output, "violation hook failed: %v\n", err)
-		return
-	}
-
-	switch hookErr.kind {
-	case violationHookStartError:
-		fmt.Fprintf(output, "violation hook failed to start: %v\n", hookErr)
-	case violationHookExitError:
-		fmt.Fprintf(output, "violation hook exited with an error: %v\n", hookErr)
-	case violationHookTimeoutError:
-		fmt.Fprintf(output, "violation hook timed out after %s: %v\n", timeout, hookErr)
-	}
 }
