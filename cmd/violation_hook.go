@@ -45,6 +45,10 @@ const (
 	violationHookPIDEnv        = "SPECMON_PID"
 
 	defaultViolationHookTimeout = 5 * time.Second
+	// violationHookWaitDelay bounds the wait for the hook's standard
+	// streams after the hook has exited or timed out: a process that the
+	// hook starts in the background may inherit them and keep them open.
+	violationHookWaitDelay = time.Second
 )
 
 type violationHookPayload struct {
@@ -139,10 +143,16 @@ func executeViolationHook(
 	command.Stdout = output
 	command.Stderr = output
 	command.Env = violationHookEnvironment(os.Environ(), payload)
+	command.WaitDelay = violationHookWaitDelay
 	if err := command.Start(); err != nil {
 		return &violationHookError{kind: violationHookStartError, err: err}
 	}
 	if err := command.Wait(); err != nil {
+		// The hook succeeded; only a process it left behind kept its
+		// streams open.
+		if errors.Is(err, exec.ErrWaitDelay) && command.ProcessState != nil && command.ProcessState.Success() {
+			return nil
+		}
 		if errors.Is(hookCtx.Err(), context.DeadlineExceeded) {
 			return &violationHookError{kind: violationHookTimeoutError, err: err}
 		}

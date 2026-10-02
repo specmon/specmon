@@ -41,6 +41,9 @@ const (
 	testEnvironmentPathEnv     = "SPECMON_TEST_ENVIRONMENT_PATH"
 	testReactionPathEnv        = "SPECMON_TEST_REACTION_PATH"
 	testMarkerPathEnv          = "SPECMON_TEST_MARKER_PATH"
+	// testHookTimeout is the hook timeout of tests that are not about the
+	// timeout; it is generous, so that a slow machine does not fail them.
+	testHookTimeout = time.Minute
 )
 
 func writeViolationHook(t *testing.T, body string) string {
@@ -107,7 +110,7 @@ printf 'hook stderr\n' >&2
 	payload := newViolationHookPayload(testViolationInfo(), "model.spthy", "client", 1234, "rewrite.spthy")
 
 	var output bytes.Buffer
-	if err := executeViolationHook(context.Background(), hook, defaultViolationHookTimeout, payload, &output); err != nil {
+	if err := executeViolationHook(context.Background(), hook, testHookTimeout, payload, &output); err != nil {
 		t.Fatalf("executeViolationHook: %v", err)
 	}
 	if got := output.String(); !strings.Contains(got, "hook stdout\n") || !strings.Contains(got, "hook stderr\n") {
@@ -194,8 +197,8 @@ func TestExecuteViolationHookFailureKinds(t *testing.T) {
 		timeout  time.Duration
 		wantKind violationHookErrorKind
 	}{
-		{name: "start", path: filepath.Join(t.TempDir(), "missing"), timeout: defaultViolationHookTimeout, wantKind: violationHookStartError},
-		{name: "exit", path: exitHook, timeout: defaultViolationHookTimeout, wantKind: violationHookExitError},
+		{name: "start", path: filepath.Join(t.TempDir(), "missing"), timeout: testHookTimeout, wantKind: violationHookStartError},
+		{name: "exit", path: exitHook, timeout: testHookTimeout, wantKind: violationHookExitError},
 		{name: "timeout", path: timeoutHook, timeout: 20 * time.Millisecond, wantKind: violationHookTimeoutError},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -224,6 +227,18 @@ func TestExecuteViolationHookIgnoresParentCancellation(t *testing.T) {
 	}
 }
 
+func TestExecuteViolationHookDoesNotWaitForInheritedStreams(t *testing.T) {
+	hook := writeViolationHook(t, "sleep 10 &\n")
+	start := time.Now()
+	var output bytes.Buffer
+	if err := executeViolationHook(context.Background(), hook, testHookTimeout, violationHookPayload{}, &output); err != nil {
+		t.Fatalf("executeViolationHook: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("hook took %s, want it to end after the hook exits", elapsed)
+	}
+}
+
 func TestMonitorRunsViolationHookBeforePIDTermination(t *testing.T) {
 	reactionPath := filepath.Join(t.TempDir(), "reaction.txt")
 	payloadPath := filepath.Join(t.TempDir(), "payload.json")
@@ -240,7 +255,7 @@ printf 'hook stderr\n' >&2
 		In:                 writeMonitorInput(t, monitorTestEventLine(t)),
 		Pid:                123,
 		OnViolation:        hook,
-		OnViolationTimeout: defaultViolationHookTimeout,
+		OnViolationTimeout: testHookTimeout,
 		terminateProcess: func(pid int) error {
 			if pid != 123 {
 				t.Fatalf("terminate process called with pid %d", pid)
@@ -293,7 +308,7 @@ func TestMonitorDoesNotRunViolationHookForOrdinaryErrors(t *testing.T) {
 		In:                 writeMonitorInput(t, []byte("not json\n")),
 		Pid:                123,
 		OnViolation:        hook,
-		OnViolationTimeout: defaultViolationHookTimeout,
+		OnViolationTimeout: testHookTimeout,
 		terminateProcess: func(int) error {
 			kills.Add(1)
 			return nil
@@ -323,13 +338,13 @@ func TestViolationHookFailureDoesNotSkipPIDTermination(t *testing.T) {
 		{
 			name:        "start",
 			path:        filepath.Join(t.TempDir(), "missing"),
-			timeout:     defaultViolationHookTimeout,
+			timeout:     testHookTimeout,
 			wantWarning: "violation hook failed to start",
 		},
 		{
 			name:        "exit",
 			path:        exitHook,
-			timeout:     defaultViolationHookTimeout,
+			timeout:     testHookTimeout,
 			wantWarning: "violation hook exited with an error",
 		},
 		{
@@ -370,7 +385,7 @@ func TestMonitorReactionFailuresDoNotMaskViolation(t *testing.T) {
 		In:                 writeMonitorInput(t, monitorTestEventLine(t)),
 		Pid:                123,
 		OnViolation:        filepath.Join(t.TempDir(), "missing"),
-		OnViolationTimeout: defaultViolationHookTimeout,
+		OnViolationTimeout: testHookTimeout,
 		terminateProcess: func(int) error {
 			return errors.New("test PID failure")
 		},
