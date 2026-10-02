@@ -366,7 +366,7 @@ func TestApplyRuleEvaluatesButDoesNotStoreInternalRHSFacts(t *testing.T) {
 	r := &rule.Rule{
 		Name: "InternalRHS",
 		RHS: []*rule.Fact{
-			rule.NewFact("Public", []term.Term{addition}, rule.LinearFact),
+			rule.NewFact("ST_Public", []term.Term{addition}, rule.LinearFact),
 			rule.NewFact(rule.ComputeFactName, []term.Term{addition}, rule.LinearFact),
 			rule.NewFact("Scratch_", []term.Term{term.NewConstant("value")}, rule.LinearFact),
 		},
@@ -384,7 +384,7 @@ func TestApplyRuleEvaluatesButDoesNotStoreInternalRHSFacts(t *testing.T) {
 		t.Fatalf("internal RHS facts entered the configuration: %v", result.Facts())
 	}
 
-	publicFacts := result.FactsAsSliceWithName("Public")
+	publicFacts := result.FactsAsSliceWithName("ST_Public")
 	if len(publicFacts) != 1 || len(publicFacts[0].Args) != 1 || !publicFacts[0].Args[0].Equal(term.NewConstant(3)) {
 		t.Fatalf("ordinary RHS evaluation changed: %v", publicFacts)
 	}

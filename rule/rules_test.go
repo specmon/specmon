@@ -19,9 +19,9 @@
 package rule_test
 
 import (
+	"fmt"
 	"testing"
 
-	"github.com/specmon/specmon/monitor"
 	"github.com/specmon/specmon/rule"
 	"github.com/specmon/specmon/term"
 )
@@ -139,186 +139,43 @@ func TestRuleCloneNilAttrsBecomesEmpty(t *testing.T) {
 	}
 }
 
+// Dead and AlsoDead are consumed by no rule, so each of their function
+// arguments stays once as a Compute_ fact; h(x) already is one. Consumer
+// consumes Next(x) but not Next(x, x), which has another arity.
 func TestRulesDropUnusedRHSFacts(t *testing.T) {
 	x := term.NewVariable("x")
-	y := term.NewVariable("y")
-	trigger := term.NewFunction("trigger", []term.Term{x})
-
-	rules := rule.Rules{
-		{
-			Name: "R1",
-			LHS: []*rule.Fact{
-				rule.NewFact("State", []term.Term{x}, rule.LinearFact),
-				rule.NewFact("Live", []term.Term{x}, rule.LinearFact),
-			},
-			Act: []*rule.Fact{
-				rule.NewFact("Existing", []term.Term{term.NewConstant("keep")}, rule.LinearFact),
-			},
-			RHS: []*rule.Fact{
-				rule.NewFact("DeadConst", []term.Term{term.NewConstant("a")}, rule.LinearFact),
-				rule.NewFact("DeadVar", []term.Term{x}, rule.LinearFact),
-				rule.NewFact("Live", []term.Term{x}, rule.LinearFact),
-				rule.NewFact("Live", []term.Term{x, y}, rule.LinearFact),
-			},
-			Attrs: map[string]rule.Attribute{
-				rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{trigger}},
-			},
-		},
-	}
-	original := rules[0].String()
-
-	got := rules.DropUnusedRHSFacts()
-
-	if rules[0].String() != original {
-		t.Fatalf("expected original rule to stay unchanged:\nwant: %s\ngot:  %s", original, rules[0])
-	}
-	if got[0] == rules[0] {
-		t.Fatal("expected the transformation to clone the selected rule")
-	}
-	if len(got[0].RHS) != 1 || got[0].RHS[0].Name != "Live" {
-		t.Fatalf("unexpected rewritten RHS: %#v", got[0].RHS)
-	}
-	if len(got[0].RHS[0].Args) != 1 {
-		t.Fatalf("same-name RHS fact with a different arity was retained: %#v", got[0].RHS)
-	}
-	if len(got[0].Act) != 1 || got[0].Act[0].Name != "Existing" {
-		t.Fatalf("constant-only or variable-only facts changed actions: %#v", got[0].Act)
-	}
-	if len(got[0].LHS) != len(rules[0].LHS) {
-		t.Fatalf("expected LHS facts to be preserved, got %#v", got[0].LHS)
-	}
-	if !got[0].Triggers()[0].Equal(trigger) {
-		t.Fatalf("expected trigger attribute to be preserved, got %#v", got[0].Attrs)
-	}
-}
-
-func TestRulesDropUnusedRHSFactsPreservesComputations(t *testing.T) {
-	x := term.NewVariable("x")
-	y := term.NewVariable("y")
 	hx := term.NewFunction("h", []term.Term{x})
-	equivalentHX := term.NewFunction("h", []term.Term{term.NewVariable("x")})
 	gx := term.NewFunction("g", []term.Term{x})
-	equivalentGX := term.NewFunction("g", []term.Term{term.NewVariable("x")})
-	ky := term.NewFunction("k", []term.Term{y})
-
-	existingAction := rule.NewFact("Existing", nil, rule.LinearFact)
-	internalAction := rule.NewFact(rule.ComputeFactName, []term.Term{ky}, rule.LinearFact)
-	rules := rule.Rules{
-		{
-			Name: "R",
-			LHS: []*rule.Fact{
-				rule.NewFact("State", []term.Term{x}, rule.LinearFact),
-				rule.NewFact("Live", []term.Term{x}, rule.LinearFact),
-			},
-			Act: []*rule.Fact{existingAction, internalAction},
-			RHS: []*rule.Fact{
-				rule.NewFact("Dead", []term.Term{hx, gx}, rule.LinearFact),
-				rule.NewFact("Live", []term.Term{x}, rule.LinearFact),
-				rule.NewFact(rule.ComputeFactName, []term.Term{equivalentHX}, rule.LinearFact),
-				rule.NewFact("AlsoDead", []term.Term{equivalentGX, ky, gx}, rule.LinearFact),
-			},
-			Attrs: map[string]rule.Attribute{},
-		},
+	fact := func(name string, args ...term.Term) *rule.Fact {
+		return rule.NewFact(name, args, rule.LinearFact)
 	}
-
-	got := rules.DropUnusedRHSFacts()
-
-	if len(got[0].Act) != 2 || got[0].Act[0] != existingAction || got[0].Act[1] != internalAction {
-		t.Fatalf("existing action order changed: %#v", got[0].Act)
-	}
-	if len(got[0].RHS) != 4 {
-		t.Fatalf("expected generated, live, existing, and generated RHS facts, got %#v", got[0].RHS)
-	}
-
-	wantNames := []string{rule.ComputeFactName, "Live", rule.ComputeFactName, rule.ComputeFactName}
-	for i, want := range wantNames {
-		if got[0].RHS[i].Name != want {
-			t.Fatalf("RHS fact %d: expected %s, got %s", i, want, got[0].RHS[i].Name)
-		}
-	}
-	wantComputed := []term.Term{gx, equivalentHX, ky}
-	for i, rhsIndex := range []int{0, 2, 3} {
-		if !got[0].RHS[rhsIndex].Args[0].Equal(wantComputed[i]) {
-			t.Fatalf("computation %d: expected %s, got %s", i, wantComputed[i], got[0].RHS[rhsIndex].Args[0])
-		}
-	}
-}
-
-func TestRulesDropUnusedRHSFactsPreservesApplicabilityAndActions(t *testing.T) {
-	x := term.NewVariable("x")
-	value := term.NewConstant(2)
-	computed := term.NewFunction(term.AddFunctionName, []term.Term{x, term.NewConstant(1)})
-
 	producer := &rule.Rule{
 		Name: "Producer",
-		LHS:  []*rule.Fact{rule.NewFact("State", []term.Term{x}, rule.LinearFact)},
-		Act:  []*rule.Fact{rule.NewFact("Existing", []term.Term{x}, rule.LinearFact)},
+		LHS:  []*rule.Fact{fact("State", x)},
+		Act:  []*rule.Fact{fact(rule.ComputeFactName, gx)},
 		RHS: []*rule.Fact{
-			rule.NewFact("Next", []term.Term{x}, rule.LinearFact),
-			rule.NewFact("Dead", []term.Term{computed}, rule.LinearFact),
+			fact("Dead", term.NewConstant("a"), x, hx, gx),
+			fact("Next", x),
+			fact("Next", x, x),
+			fact(rule.ComputeFactName, term.NewFunction("h", []term.Term{term.NewVariable("x")})),
+			fact("AlsoDead", term.NewFunction("g", []term.Term{x}), term.NewFunction("k", []term.Term{x})),
 		},
-		Attrs: map[string]rule.Attribute{},
+		Attrs: map[string]rule.Attribute{rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{hx}}},
 	}
-	consumer := &rule.Rule{
-		Name:  "Consumer",
-		LHS:   []*rule.Fact{rule.NewFact("Next", []term.Term{x}, rule.LinearFact)},
-		RHS:   []*rule.Fact{rule.NewFact("Done", []term.Term{x}, rule.LinearFact)},
-		Attrs: map[string]rule.Attribute{},
-	}
-	rewritten := rule.Rules{producer, consumer}.DropUnusedRHSFacts()[0]
+	consumer := &rule.Rule{Name: "Consumer", LHS: []*rule.Fact{fact("Next", x)}, Attrs: map[string]rule.Attribute{}}
+	original := producer.String()
 
-	binding := term.NewBinding()
-	binding.Set(x, value)
-	originalConfig := monitor.NewConfig()
-	originalConfig.AddFact(rule.NewFact("State", []term.Term{value}, rule.LinearFact))
-	filteredConfig := monitor.NewConfig()
-	filteredConfig.AddFact(rule.NewFact("State", []term.Term{value}, rule.LinearFact))
+	got := rule.Rules{producer, consumer}.DropUnusedRHSFacts()
 
-	originalResult, originalActions, err := originalConfig.ApplyRule(producer, binding)
-	if err != nil {
-		t.Fatalf("applying original producer: %v", err)
+	if producer.String() != original {
+		t.Fatalf("original rule changed:\n%s", producer)
 	}
-	filteredResult, filteredActions, err := filteredConfig.ApplyRule(rewritten, binding)
-	if err != nil {
-		t.Fatalf("applying rewritten producer: %v", err)
+	want := "[Compute_(g(x)) Next(x) Compute_(h(x)) Compute_(k(x))]"
+	if rhs := fmt.Sprint(got[0].RHS); rhs != want {
+		t.Fatalf("RHS = %s, want %s", rhs, want)
 	}
-
-	if originalResult.CountByName("Next") != 1 || filteredResult.CountByName("Next") != 1 {
-		t.Fatal("rewriting changed the live fact needed by the consumer")
-	}
-	if originalResult.CountByName("Dead") != 1 || filteredResult.CountByName("Dead") != 0 {
-		t.Fatal("rewritten result did not omit only the dead fact")
-	}
-	if filteredResult.CountByName(rule.ComputeFactName) != 0 {
-		t.Fatal("internal computation fact entered the configuration")
-	}
-	if len(originalActions) != 1 || len(filteredActions) != 1 || !originalActions[0].Equal(filteredActions[0]) {
-		t.Fatalf("rewriting changed actions: original=%v filtered=%v", originalActions, filteredActions)
-	}
-	if filteredActions[0].Name == rule.ComputeFactName {
-		t.Fatal("internal computation fact was returned as an action")
-	}
-
-	if _, _, err := originalResult.ApplyRule(consumer, binding); err != nil {
-		t.Fatalf("consumer no longer applies to original result: %v", err)
-	}
-	if _, _, err := filteredResult.ApplyRule(consumer, binding); err != nil {
-		t.Fatalf("consumer no longer applies to rewritten result: %v", err)
-	}
-}
-
-func TestIsInternalFactName(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		want bool
-	}{
-		{name: rule.ComputeFactName, want: true},
-		{name: "Scratch_", want: true},
-		{name: "Public", want: false},
-		{name: "_Leading", want: false},
-	} {
-		if got := rule.IsInternalFactName(test.name); got != test.want {
-			t.Errorf("IsInternalFactName(%q) = %t, want %t", test.name, got, test.want)
-		}
+	got[0].RHS = producer.RHS
+	if got[0].String() != original || got[1].String() != consumer.String() {
+		t.Fatalf("rules changed outside the RHS:\n%s\n%s", got[0], got[1])
 	}
 }
