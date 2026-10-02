@@ -195,6 +195,38 @@ func TestMonitorOpensInputBeforePreTrace(t *testing.T) {
 	}
 }
 
+// TestMonitorLoadsRewriteModelBeforePreTrace checks that an invalid
+// rewrite model ends the command before the pre-trace is processed, so
+// that no violation reaction runs.
+func TestMonitorLoadsRewriteModelBeforePreTrace(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	t.Setenv(testMarkerPathEnv, markerPath)
+	var kills atomic.Int32
+	cmd := monitorTestCommand()
+	config := MonitorConfig{
+		In:                 writeMonitorInput(t, nil),
+		PreTrace:           writeMonitorInput(t, monitorEventLine(t, monitorTestOtherEventName)),
+		RewriteWith:        filepath.Join(t.TempDir(), "missing.spthy"),
+		Pid:                123,
+		OnViolation:        writeViolationHook(t, "printf 'ran' > \"$"+testMarkerPathEnv+"\"\n"),
+		OnViolationTimeout: testHookTimeout,
+		terminateProcess: func(int) error {
+			kills.Add(1)
+			return nil
+		},
+	}
+	err := config.RunE(cmd, []string{writeMonitorSpec(t, acceptingSpec)})
+	if err == nil || !strings.Contains(err.Error(), "cannot process rewrite rules") {
+		t.Fatalf("RunE error = %v, want the rewrite model error", err)
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) || kills.Load() != 0 {
+		t.Fatalf("violation reaction ran before the rewrite model was loaded: hook %v, kills %d", err, kills.Load())
+	}
+	if out := cmd.OutOrStdout().(*bytes.Buffer).String(); out != "" {
+		t.Fatalf("pre-trace was processed before the rewrite model was loaded: %q", out)
+	}
+}
+
 func TestMonitorPreTraceViolationRunsReaction(t *testing.T) {
 	payloadPath := filepath.Join(t.TempDir(), "payload.json")
 	t.Setenv(testPayloadPathEnv, payloadPath)

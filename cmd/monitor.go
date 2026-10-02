@@ -103,6 +103,20 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	var rewriter *monitor.Monitor
+	if r.RewriteWith != "" {
+		// Rewrite rules translate instrumentation events independently of the
+		// monitored protocol role.
+		rewriteRules, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
+		if err != nil {
+			return fmt.Errorf("cannot process rewrite rules: %w", err)
+		}
+		rewriter, err = monitor.NewMonitor(rewriteRules.Parsed)
+		if err != nil {
+			return fmt.Errorf("cannot create rewrite monitor: %w", err)
+		}
+	}
+
 	if r.PreTrace != "" {
 		preTrace, err := os.Open(r.PreTrace)
 		if err != nil {
@@ -121,20 +135,6 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 				return nil
 			}
 			return fmt.Errorf("process pre-trace: %w", runErr)
-		}
-	}
-
-	var rewriter *monitor.Monitor
-	if r.RewriteWith != "" {
-		// Rewrite rules translate instrumentation events independently of the
-		// monitored protocol role.
-		rewriteRules, err := ProcessRules(runCtx, r.RewriteWith, role, decompose, defines)
-		if err != nil {
-			return fmt.Errorf("cannot process rewrite rules: %w", err)
-		}
-		rewriter, err = monitor.NewMonitor(rewriteRules.Parsed)
-		if err != nil {
-			return fmt.Errorf("cannot create rewrite monitor: %w", err)
 		}
 	}
 
