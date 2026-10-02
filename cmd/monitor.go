@@ -23,8 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/specmon/specmon/monitor"
@@ -60,10 +58,8 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		terminateProcess = utils.KillProcess
 	}
 
-	runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	runCtx, stop := signalContext(cmd.Context())
 	defer stop()
-	// After the first signal, a second one ends the process at once.
-	context.AfterFunc(runCtx, stop)
 
 	specPath := args[0]
 

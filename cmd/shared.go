@@ -25,9 +25,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/specmon/specmon/parser"
@@ -72,6 +74,15 @@ func ProcessRules(ctx context.Context, specPath, role string, decompose bool, de
 		Selected:   selectedRules,
 		Executable: decompRules,
 	}, nil
+}
+
+// signalContext returns a context that the first SIGINT or SIGTERM
+// cancels. The signals are then released, so that a second one ends the
+// process at once, also while a write blocks.
+func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(signalCtx, stop)
+	return signalCtx, stop
 }
 
 // addFlagsFromStruct adds flags to the given command from the given struct.

@@ -24,8 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/specmon/specmon/monitor"
 	"github.com/spf13/cobra"
@@ -40,7 +38,7 @@ type RewriteConfig struct {
 
 // RunE runs the rewrite subcommand.
 func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
-	runCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	runCtx, stop := signalContext(cmd.Context())
 	defer stop()
 
 	specPath := args[0]
