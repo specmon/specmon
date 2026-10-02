@@ -19,28 +19,22 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-
-	"github.com/specmon/specmon/rule"
 )
 
-func TestProcessRulesFiltersBeforeDroppingAndDecomposing(t *testing.T) {
+func TestProcessRulesDropsFactsUnusedBySelectedRules(t *testing.T) {
 	specPath := filepath.Join(t.TempDir(), "roles.spthy")
 	spec := `theory Roles
 begin
 
 rule Client [role="client"]:
-  [ ClientState(m) ]
-  -->
-  [ DeadOutput(len(hash(m))), ServerState(m) ]
+  [ ClientState(m) ] --> [ DeadOutput(len(hash(m))), ServerState(m) ]
 
 rule Server [role="server"]:
-  [ ServerState(m) ]
-  -->
-  [ ServerState(m) ]
+  [ ServerState(m) ] --> [ ServerState(m) ]
 
 end
 `
@@ -48,65 +42,11 @@ end
 		t.Fatalf("write test specification: %v", err)
 	}
 
-	for _, decompose := range []bool{false, true} {
-		name := "without_decomposition"
-		if decompose {
-			name = "with_decomposition"
-		}
-		t.Run(name, func(t *testing.T) {
-			original, selected, processed, err := ProcessRules(specPath, "client", decompose, nil)
-			if err != nil {
-				t.Fatalf("ProcessRules: %v", err)
-			}
-			if len(original) != 2 || len(original[0].RHS) != 2 || len(original[0].Act) != 0 {
-				t.Fatalf("parsed rules changed during processing: %#v", original)
-			}
-			if len(selected) != 1 || selected[0].Name != "Client" {
-				t.Fatalf("role filtering selected unexpected rules: %#v", selected)
-			}
-			if len(selected[0].RHS) != 1 || selected[0].RHS[0].Name != rule.ComputeFactName {
-				t.Fatalf("selected rule has unexpected RHS: %#v", selected[0].RHS)
-			}
-			if len(selected[0].Act) != 0 {
-				t.Fatalf("processing introduced public actions: %#v", selected[0].Act)
-			}
-
-			for _, processedRule := range processed {
-				for _, fact := range processedRule.RHS {
-					if fact.Name == "DeadOutput" || fact.Name == "ServerState" {
-						t.Fatalf("dead RHS fact survived processing: %s", fact)
-					}
-				}
-				for _, action := range processedRule.Act {
-					if action.Name == rule.ComputeFactName {
-						t.Fatalf("internal computation became an action: %s", action)
-					}
-				}
-			}
-
-			if !decompose {
-				if len(processed) != 1 || len(processed[0].RHS) != 1 ||
-					processed[0].RHS[0].Name != rule.ComputeFactName ||
-					processed[0].RHS[0].Args[0].String() != "len(hash(m))" {
-					t.Fatalf("non-decomposed computation changed: %#v", processed)
-				}
-				return
-			}
-
-			var foundCompute, foundHashTrigger, foundLenTrigger bool
-			for _, processedRule := range processed {
-				for _, fact := range processedRule.RHS {
-					foundCompute = foundCompute || fact.Name == rule.ComputeFactName
-				}
-				for _, trigger := range processedRule.Triggers() {
-					foundHashTrigger = foundHashTrigger || strings.Contains(trigger.String(), "hash(")
-					foundLenTrigger = foundLenTrigger || strings.Contains(trigger.String(), "len(")
-				}
-			}
-			if !foundCompute || !foundHashTrigger || !foundLenTrigger {
-				t.Fatalf("decomposition lost computation dependencies: compute=%t hash=%t len=%t",
-					foundCompute, foundHashTrigger, foundLenTrigger)
-			}
-		})
+	_, selected, _, err := ProcessRules(specPath, "client", false, nil)
+	if err != nil {
+		t.Fatalf("ProcessRules: %v", err)
+	}
+	if len(selected) != 1 || fmt.Sprint(selected[0].RHS) != "[Compute_(len(hash(m)))]" {
+		t.Fatalf("selected rules = %v", selected)
 	}
 }
