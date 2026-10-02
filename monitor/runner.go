@@ -42,7 +42,7 @@ func (m *Monitor) Run(
 
 // Rewrite processes the events of r with rewrite rules and hands each
 // output event to onOutput. It closes r. A violation is returned as an
-// error.
+// error that names the index and the term of the rejected event.
 func (m *Monitor) Rewrite(
 	ctx context.Context,
 	r io.ReadCloser,
@@ -50,7 +50,8 @@ func (m *Monitor) Rewrite(
 ) error {
 	violation, err := runMonitor(ctx, m, r, true, onOutput, nil)
 	if violation != nil {
-		return fmt.Errorf("rewrite violation: %w", violation.Err)
+		return fmt.Errorf("rewrite violation at event %d: %w %s",
+			violation.EventIndex, violation.Err, violation.TimedEvent.Event)
 	}
 	return err
 }

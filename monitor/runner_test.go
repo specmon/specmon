@@ -459,6 +459,18 @@ func TestRewriteCallbackErrorClosesBlockingInput(t *testing.T) {
 	}
 }
 
+func TestRewriteViolationNamesEvent(t *testing.T) {
+	t.Parallel()
+
+	rejected := runnerEvent(runnerOutputEventName, term.NewFunction(term.PairFunctionName, nil))
+	input := append(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant(1))), runnerEventLine(t, rejected)...)
+	err := rewritingRunnerMonitor(t).Rewrite(context.Background(), io.NopCloser(strings.NewReader(string(input))), nil)
+	want := "rewrite violation at event 2: no applicable rule found " + rejected.String()
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || err.Error() != want {
+		t.Fatalf("Rewrite error = %v, want %q", err, want)
+	}
+}
+
 func TestRewriteHandlesEveryOutputBeforeAViolation(t *testing.T) {
 	t.Parallel()
 
