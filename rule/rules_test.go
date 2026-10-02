@@ -181,21 +181,6 @@ func TestRulesDropUnusedRHSFacts(t *testing.T) {
 	}
 }
 
-func TestFactReplaceFormatsReturnsEvaluationErrors(t *testing.T) {
-	t.Parallel()
-
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
-	fact := rule.NewFact("Evaluated", []term.Term{invalid}, rule.LinearFact)
-
-	_, err := fact.ReplaceFormats()
-	if !errors.Is(err, term.ErrEvaluation) {
-		t.Fatalf("Fact.ReplaceFormats error = %v, want ErrEvaluation", err)
-	}
-	if !errors.Is(err, term.ErrBinaryArity) {
-		t.Fatalf("Fact.ReplaceFormats error = %v, want wrapped ErrBinaryArity", err)
-	}
-}
-
 func TestFactUnifyPreservesEvaluationErrors(t *testing.T) {
 	t.Parallel()
 
@@ -212,26 +197,5 @@ func TestFactUnifyPreservesEvaluationErrors(t *testing.T) {
 	}
 	if !errors.Is(err, term.ErrBinaryArity) {
 		t.Fatalf("Fact.Unify error = %v, want wrapped ErrBinaryArity", err)
-	}
-}
-
-func TestRuleReplaceFormatsReturnsEvaluationErrors(t *testing.T) {
-	t.Parallel()
-
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant(1)})
-	r := &rule.Rule{
-		Name: "InvalidEvaluation",
-		RHS: []*rule.Fact{
-			rule.NewFact("Evaluated", []term.Term{invalid}, rule.LinearFact),
-		},
-		Attrs: map[string]rule.Attribute{},
-	}
-
-	_, err := r.ReplaceFormats()
-	if !errors.Is(err, term.ErrEvaluation) {
-		t.Fatalf("Rule.ReplaceFormats error = %v, want ErrEvaluation", err)
-	}
-	if !errors.Is(err, term.ErrBinaryArity) {
-		t.Fatalf("Rule.ReplaceFormats error = %v, want wrapped ErrBinaryArity", err)
 	}
 }

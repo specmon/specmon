@@ -116,17 +116,7 @@ printf 'hook stderr\n' >&2
 		t.Fatalf("forwarded hook output = %q", got)
 	}
 
-	payloadBytes, err := os.ReadFile(payloadPath)
-	if err != nil {
-		t.Fatalf("read hook payload: %v", err)
-	}
-	if !bytes.HasSuffix(payloadBytes, []byte("\n")) {
-		t.Fatalf("hook payload is not newline terminated: %q", payloadBytes)
-	}
-	var gotPayload violationHookPayload
-	if err := json.Unmarshal(payloadBytes, &gotPayload); err != nil {
-		t.Fatalf("unmarshal hook payload: %v", err)
-	}
+	gotPayload := readMonitorHookPayload(t, payloadPath)
 	if gotPayload.SchemaVersion != violationHookSchemaVersion || gotPayload.Kind != violationHookKind {
 		t.Fatalf("hook payload version or kind = %#v", gotPayload)
 	}
@@ -210,7 +200,7 @@ printf 'hook stderr\n' >&2
 
 	specPath := filepath.Join("..", "testdata", "translation", "no_decomposition", "input.spthy")
 	config := MonitorConfig{
-		In:                 writeMonitorInput(t, monitorTestEventLine(t)),
+		In:                 writeMonitorInput(t, monitorEventLine(t, monitorTestEventName)),
 		Pid:                123,
 		OnViolation:        hook,
 		OnViolationTimeout: testHookTimeout,
@@ -244,14 +234,7 @@ printf 'hook stderr\n' >&2
 		t.Fatalf("command stderr did not receive hook output: %q", stderr)
 	}
 
-	payloadBytes, err := os.ReadFile(payloadPath)
-	if err != nil {
-		t.Fatalf("read monitor hook payload: %v", err)
-	}
-	var payload violationHookPayload
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		t.Fatalf("unmarshal monitor hook payload: %v", err)
-	}
+	payload := readMonitorHookPayload(t, payloadPath)
 	if payload.EventIndex != 1 || payload.Stats.Received != 1 || payload.Stats.Processed != 0 {
 		t.Fatalf("monitor hook payload boundary = %#v", payload)
 	}
@@ -340,7 +323,7 @@ func TestViolationHookFailureDoesNotSkipPIDTermination(t *testing.T) {
 func TestMonitorReactionFailuresDoNotMaskViolation(t *testing.T) {
 	specPath := filepath.Join("..", "testdata", "translation", "no_decomposition", "input.spthy")
 	config := MonitorConfig{
-		In:                 writeMonitorInput(t, monitorTestEventLine(t)),
+		In:                 writeMonitorInput(t, monitorEventLine(t, monitorTestEventName)),
 		Pid:                123,
 		OnViolation:        filepath.Join(t.TempDir(), "missing"),
 		OnViolationTimeout: testHookTimeout,

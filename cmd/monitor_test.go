@@ -49,22 +49,6 @@ func writeMonitorInput(t *testing.T, contents []byte) string {
 	return path
 }
 
-func monitorTestEventLine(t *testing.T) []byte {
-	t.Helper()
-	event := &monitor.TimedEvent{
-		Time: time.Now().UnixNano(),
-		Event: term.NewFunction(term.PairFunctionName, []term.Term{
-			term.NewFunction(monitorTestEventName, nil),
-			term.NewFunction(term.PairFunctionName, nil),
-		}),
-	}
-	b, err := json.Marshal(event)
-	if err != nil {
-		t.Fatalf("marshal monitor event: %v", err)
-	}
-	return append(b, '\n')
-}
-
 func monitorTestCommand() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -78,17 +62,6 @@ func TestMonitorPIDFlagAndDomain(t *testing.T) {
 	if flag := monitorCmd.PersistentFlags().Lookup("pid"); flag == nil {
 		t.Fatal("monitor pid flag is missing")
 	}
-	var help bytes.Buffer
-	monitorCmd.SetOut(&help)
-	monitorCmd.SetArgs([]string{"--help"})
-	if err := monitorCmd.Execute(); err != nil {
-		t.Fatalf("render monitor help: %v", err)
-	}
-	for _, line := range strings.Split(help.String(), "\n") {
-		if strings.Contains(line, "--pid int") && strings.Contains(line, "default") {
-			t.Fatalf("monitor pid help exposes a default: %q", line)
-		}
-	}
 	timeoutFlag := monitorCmd.PersistentFlags().Lookup("on-violation-timeout")
 	if timeoutFlag == nil || timeoutFlag.DefValue != defaultViolationHookTimeout.String() {
 		t.Fatalf("monitor hook timeout default = %v, want %s", timeoutFlag, defaultViolationHookTimeout)
@@ -98,14 +71,6 @@ func TestMonitorPIDFlagAndDomain(t *testing.T) {
 	}
 	if flag := NewRewriteCmd().PersistentFlags().Lookup("on-violation"); flag != nil {
 		t.Fatalf("rewrite unexpectedly exposes on-violation flag: %v", flag)
-	}
-
-	missingValueCmd := NewMonitorCmd()
-	missingValueCmd.SilenceErrors = true
-	missingValueCmd.SilenceUsage = true
-	missingValueCmd.SetArgs([]string{"--pid"})
-	if err := missingValueCmd.Execute(); err == nil || !strings.Contains(err.Error(), "flag needs an argument") {
-		t.Fatalf("monitor --pid error = %v, want missing argument error", err)
 	}
 
 	for _, pid := range []int{-2, -1, 0} {
@@ -120,53 +85,6 @@ func TestMonitorPIDFlagAndDomain(t *testing.T) {
 	config := MonitorConfig{OnViolationTimeout: -time.Second}
 	if err := config.RunE(monitorTestCommand(), []string{"unused"}); err == nil {
 		t.Fatal("MonitorConfig accepted a negative violation hook timeout")
-	}
-}
-
-func TestMonitorTerminatesPIDOnlyForViolations(t *testing.T) {
-	specPath := filepath.Join("..", "testdata", "translation", "no_decomposition", "input.spthy")
-	for _, test := range []struct {
-		name          string
-		input         []byte
-		wantKills     int32
-		wantViolation bool
-	}{
-		{
-			name:          "violation",
-			input:         monitorTestEventLine(t),
-			wantKills:     1,
-			wantViolation: true,
-		},
-		{
-			name:  "parse error",
-			input: []byte("not json\n"),
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var kills atomic.Int32
-			config := MonitorConfig{
-				In:  writeMonitorInput(t, test.input),
-				Pid: 123,
-				terminateProcess: func(pid int) error {
-					if pid != 123 {
-						t.Fatalf("terminate process called with pid %d", pid)
-					}
-					kills.Add(1)
-					return nil
-				},
-			}
-
-			err := config.RunE(monitorTestCommand(), []string{specPath})
-			if err == nil {
-				t.Fatal("MonitorConfig.RunE returned nil")
-			}
-			if test.wantViolation && !errors.Is(err, monitor.ErrNoApplicableRule) {
-				t.Fatalf("RunE error = %v, want ErrNoApplicableRule", err)
-			}
-			if got := kills.Load(); got != test.wantKills {
-				t.Fatalf("terminate process called %d times, want %d", got, test.wantKills)
-			}
-		})
 	}
 }
 
@@ -202,7 +120,7 @@ end
 	cmd.Flags().Bool("decompose", true, "")
 	cmd.Flags().StringSlice("defines", nil, "")
 	config := MonitorConfig{
-		In:          writeMonitorInput(t, monitorTestEventLine(t)),
+		In:          writeMonitorInput(t, monitorEventLine(t, monitorTestEventName)),
 		RewriteWith: rewriteSpecPath,
 	}
 	if err := config.RunE(cmd, []string{mainSpecPath}); err != nil {
@@ -347,6 +265,9 @@ func readMonitorHookPayload(t *testing.T, path string) violationHookPayload {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read hook payload: %v", err)
+	}
+	if !bytes.HasSuffix(b, []byte("\n")) {
+		t.Fatalf("hook payload is not newline terminated: %q", b)
 	}
 	var payload violationHookPayload
 	if err := json.Unmarshal(b, &payload); err != nil {

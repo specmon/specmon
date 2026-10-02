@@ -127,6 +127,31 @@ func acceptingRunnerMonitor(t *testing.T) *monitor.Monitor {
 	return m
 }
 
+// rewritingRunnerMonitor rewrites each input event into an output event
+// with the same value.
+func rewritingRunnerMonitor(t *testing.T) *monitor.Monitor {
+	t.Helper()
+	value := term.NewVariable(runnerValueName)
+	r := &rule.Rule{
+		Name: runnerRuleName,
+		Act: []*rule.Fact{
+			rule.NewFact(monitor.RewriteEventName, []term.Term{
+				runnerEvent(runnerOutputEventName, value),
+			}, rule.LinearFact),
+		},
+		Attrs: map[string]rule.Attribute{
+			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
+				runnerEvent(runnerInputEventName, value),
+			}},
+		},
+	}
+	m, err := monitor.NewMonitor([]*rule.Rule{r})
+	if err != nil {
+		t.Fatalf("NewMonitor: %v", err)
+	}
+	return m
+}
+
 func TestStatsSummaryDoesNotMutateSamples(t *testing.T) {
 	t.Parallel()
 
@@ -421,26 +446,9 @@ func TestRewriteCallbackErrorClosesBlockingInput(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("output callback failed")
-	value := term.NewVariable(runnerValueName)
-	r := &rule.Rule{
-		Name: runnerRuleName,
-		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
-				runnerEvent(runnerOutputEventName, value),
-			}, rule.LinearFact),
-		},
-		Attrs: map[string]rule.Attribute{
-			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
-				runnerEvent(runnerInputEventName, value),
-			}},
-		},
-	}
-	m, err := monitor.NewMonitor([]*rule.Rule{r})
-	if err != nil {
-		t.Fatalf("NewMonitor: %v", err)
-	}
+	m := rewritingRunnerMonitor(t)
 	reader := newBlockingReader(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant(1))))
-	err = m.Rewrite(context.Background(), reader, func(*monitor.TimedEvent) error {
+	err := m.Rewrite(context.Background(), reader, func(*monitor.TimedEvent) error {
 		return wantErr
 	})
 	if !errors.Is(err, wantErr) {
@@ -454,24 +462,7 @@ func TestRewriteCallbackErrorClosesBlockingInput(t *testing.T) {
 func TestRewriteHandlesEveryOutputBeforeAViolation(t *testing.T) {
 	t.Parallel()
 
-	value := term.NewVariable(runnerValueName)
-	r := &rule.Rule{
-		Name: runnerRuleName,
-		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
-				runnerEvent(runnerOutputEventName, value),
-			}, rule.LinearFact),
-		},
-		Attrs: map[string]rule.Attribute{
-			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
-				runnerEvent(runnerInputEventName, value),
-			}},
-		},
-	}
-	m, err := monitor.NewMonitor([]*rule.Rule{r})
-	if err != nil {
-		t.Fatalf("NewMonitor: %v", err)
-	}
+	m := rewritingRunnerMonitor(t)
 	const accepted = 200
 	var input strings.Builder
 	for range accepted {
@@ -483,7 +474,7 @@ func TestRewriteHandlesEveryOutputBeforeAViolation(t *testing.T) {
 	// every event and the other outputs and the violation are pending
 	// together.
 	outputs := 0
-	err = m.Rewrite(context.Background(), io.NopCloser(strings.NewReader(input.String())), func(*monitor.TimedEvent) error {
+	err := m.Rewrite(context.Background(), io.NopCloser(strings.NewReader(input.String())), func(*monitor.TimedEvent) error {
 		if outputs == 0 {
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -502,24 +493,7 @@ func TestRunPipelineSettlesAfterDownstreamViolation(t *testing.T) {
 	t.Parallel()
 
 	const eventCount = 5000
-	value := term.NewVariable(runnerValueName)
-	rewriteRule := &rule.Rule{
-		Name: runnerRuleName,
-		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
-				runnerEvent(runnerOutputEventName, value),
-			}, rule.LinearFact),
-		},
-		Attrs: map[string]rule.Attribute{
-			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
-				runnerEvent(runnerInputEventName, value),
-			}},
-		},
-	}
-	rewriter, err := monitor.NewMonitor([]*rule.Rule{rewriteRule})
-	if err != nil {
-		t.Fatalf("NewMonitor rewriter: %v", err)
-	}
+	rewriter := rewritingRunnerMonitor(t)
 	main, err := monitor.NewMonitor(nil)
 	if err != nil {
 		t.Fatalf("NewMonitor main: %v", err)

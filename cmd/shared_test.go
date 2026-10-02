@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -58,60 +57,27 @@ end
 	}
 }
 
-type testListener struct {
-	connections chan net.Conn
-	closed      chan struct{}
-	closeOnce   sync.Once
-}
-
-func newTestListener() *testListener {
-	return &testListener{
-		connections: make(chan net.Conn, 1),
-		closed:      make(chan struct{}),
-	}
-}
-
-func (l *testListener) Accept() (net.Conn, error) {
-	select {
-	case conn := <-l.connections:
-		return conn, nil
-	case <-l.closed:
-		return nil, net.ErrClosed
-	}
-}
-
-func (l *testListener) Close() error {
-	l.closeOnce.Do(func() {
-		close(l.closed)
-	})
-	return nil
-}
-
-func (l *testListener) Addr() net.Addr {
-	return testAddr("test")
-}
-
 type failingListener struct {
 	err error
 }
 
 func (l *failingListener) Accept() (net.Conn, error) { return nil, l.err }
 func (l *failingListener) Close() error              { return nil }
-func (l *failingListener) Addr() net.Addr            { return testAddr("failing") }
-
-type testAddr string
-
-func (a testAddr) Network() string { return string(a) }
-func (a testAddr) String() string  { return string(a) }
+func (l *failingListener) Addr() net.Addr            { return nil }
 
 func TestMultiplexedReaderCloseSettlesConnections(t *testing.T) {
 	t.Parallel()
 
-	listener := newTestListener()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
 	reader := newMultiplexedReader(listener)
-	server, client := net.Pipe()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
 	defer client.Close()
-	listener.connections <- server
 
 	line := strings.Repeat("event", 1000)
 	writeResult := make(chan error, 1)
