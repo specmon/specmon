@@ -889,14 +889,10 @@ func TestProcessEventHandlesInvalidEvaluatedCandidates(t *testing.T) {
 						}
 						return
 					}
-					if !errors.Is(err, term.ErrEvaluation) {
-						t.Fatalf("ProcessEvent error = %v, want ErrEvaluation", err)
-					}
-					if !errors.Is(err, term.ErrBinaryArity) {
-						t.Fatalf("ProcessEvent error = %v, want wrapped ErrBinaryArity", err)
-					}
-					if errors.Is(err, monitor.ErrNoApplicableRule) {
-						t.Fatalf("ProcessEvent classified evaluator failure as a violation: %v", err)
+					// A failed evaluation is not a match. With no other
+					// candidate the event is rejected.
+					if !errors.Is(err, monitor.ErrNoApplicableRule) || errors.Is(err, term.ErrEvaluation) {
+						t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule", err)
 					}
 				})
 			}
