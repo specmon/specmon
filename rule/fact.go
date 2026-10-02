@@ -36,8 +36,7 @@ const (
 	LinearFact     = FactType("linear")
 	PersistentFact = FactType("persistent")
 
-	InternalFactSuffix = "_"
-	ComputeFactName    = "Compute_"
+	ComputeFactName = "Compute_"
 )
 
 var ErrFactUnify = errors.New("cannot unify facts")
@@ -66,9 +65,9 @@ func NewFact(name string, args []term.Term, t FactType) *Fact {
 	}
 }
 
-// IsInternalFactName reports whether name is reserved for an internal RHS fact.
+// IsInternalFactName reports whether name marks a fact that is never stored.
 func IsInternalFactName(name string) bool {
-	return strings.HasSuffix(name, InternalFactSuffix)
+	return strings.HasSuffix(name, "_")
 }
 
 func (f *Fact) IsLinear() bool {

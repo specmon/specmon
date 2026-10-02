@@ -360,53 +360,40 @@ func (r Rules) FilterByRole(role string) Rules {
 }
 
 // DropUnusedRHSFacts removes RHS facts when no LHS fact has the same name and
-// arity. Top level function arguments from removed facts remain available for
-// evaluation through internal RHS facts.
+// arity. Each distinct top level function argument of a removed fact stays as
+// a Compute_ fact, so that it is still evaluated and decomposed into triggers.
 func (r Rules) DropUnusedRHSFacts() Rules {
-	if r == nil {
-		return nil
-	}
-
 	var lhs Facts
-	for _, currentRule := range r {
-		lhs = append(lhs, currentRule.LHS...)
+	for _, current := range r {
+		lhs = append(lhs, current.LHS...)
 	}
 
 	processed := make(Rules, 0, len(r))
-	for _, currentRule := range r {
-		clone := currentRule.Clone()
-		rhs := make([]*Fact, 0, len(clone.RHS))
+	for _, current := range r {
+		clone := current.Clone()
+		clone.RHS = make([]*Fact, 0, len(current.RHS))
 		var computations []term.Term
-		hasComputation := func(candidate term.Term) bool {
-			return slices.ContainsFunc(computations, func(existing term.Term) bool {
-				return existing.Equal(candidate)
-			})
-		}
-		for _, fact := range clone.RHS {
-			if fact.Name == ComputeFactName && len(fact.Args) == 1 && !hasComputation(fact.Args[0]) {
+		for _, fact := range current.RHS {
+			if fact.Name == ComputeFactName && len(fact.Args) == 1 {
 				computations = append(computations, fact.Args[0])
 			}
 		}
 
-		for _, fact := range clone.RHS {
+		for _, fact := range current.RHS {
 			isLive := slices.ContainsFunc(lhs, func(lhsFact *Fact) bool {
 				return lhsFact.Name == fact.Name && len(lhsFact.Args) == len(fact.Args)
 			})
 			if isLive || fact.Name == ComputeFactName {
-				rhs = append(rhs, fact)
+				clone.RHS = append(clone.RHS, fact)
 				continue
 			}
-
 			for _, arg := range fact.Args {
-				if arg.GetType() != term.FunctionType || hasComputation(arg) {
-					continue
+				if arg.GetType() == term.FunctionType && !slices.ContainsFunc(computations, arg.Equal) {
+					computations = append(computations, arg)
+					clone.RHS = append(clone.RHS, NewFact(ComputeFactName, []term.Term{arg}, LinearFact))
 				}
-				computations = append(computations, arg)
-				rhs = append(rhs, NewFact(ComputeFactName, []term.Term{arg}, LinearFact))
 			}
 		}
-
-		clone.RHS = rhs
 		processed = append(processed, clone)
 	}
 
