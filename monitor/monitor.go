@@ -726,8 +726,13 @@ type TimedEvent struct {
 	Event *term.Function `json:"event"`
 }
 
+// ViolationKindNoApplicableRule is the kind of a violation in which no
+// rule accepts the event.
 const ViolationKindNoApplicableRule = "no_applicable_rule"
 
+// ViolationInfo describes a violation: the rejected event, its one-based
+// index among the events this monitor received, and the statistics at
+// that point.
 type ViolationInfo struct {
 	Err        error
 	ErrorKind  string
@@ -736,11 +741,15 @@ type ViolationInfo struct {
 	Stats      StatsSummary
 }
 
+// StreamResult is the outcome of processing an event stream: a violation,
+// an error, or neither when the stream ended.
 type StreamResult struct {
 	Violation *ViolationInfo
 	Err       error
 }
 
+// StatsSummary holds the event counts and durations of Stats in
+// nanoseconds.
 type StatsSummary struct {
 	Received              int   `json:"received"`
 	Processed             int   `json:"processed"`
@@ -771,45 +780,40 @@ func (s *Stats) String() string {
 		time.Duration(summary.AvgProcessingTimeNS))
 }
 
+// Summary returns the counts and durations of s, with the total time
+// measured up to end. It does not reorder the samples.
 func (s *Stats) Summary(end time.Time) StatsSummary {
-	received := slices.Clone(s.LatenciesReceived)
-	processed := slices.Clone(s.LatenciesProcessed)
-
-	var summary StatsSummary
-	summary.Received = len(received)
-	summary.Processed = len(processed)
+	summary := StatsSummary{Received: len(s.LatenciesReceived), Processed: len(s.LatenciesProcessed)}
 	if !s.StartTime.IsZero() && !end.IsZero() {
 		summary.TotalTimeNS = end.Sub(s.StartTime).Nanoseconds()
 	}
 
-	paired := min(len(received), len(processed))
+	paired := min(summary.Received, summary.Processed)
 	var processingTotal time.Duration
-	for i := 0; i < paired; i++ {
-		processingTotal += processed[i] - received[i]
+	for i := range paired {
+		processingTotal += s.LatenciesProcessed[i] - s.LatenciesReceived[i]
 	}
 	if paired > 0 {
 		summary.AvgProcessingTimeNS = (processingTotal / time.Duration(paired)).Nanoseconds()
 	}
 
-	var receivedTotal time.Duration
-	for _, latency := range received {
-		receivedTotal += latency
-	}
-	if len(received) > 0 {
-		summary.AvgLatencyReceivedNS = (receivedTotal / time.Duration(len(received))).Nanoseconds()
-		summary.MedLatencyReceivedNS = time.Duration(utils.MedianDuration(received)).Nanoseconds()
-	}
-
-	var processedTotal time.Duration
-	for _, latency := range processed {
-		processedTotal += latency
-	}
-	if len(processed) > 0 {
-		summary.AvgLatencyProcessedNS = (processedTotal / time.Duration(len(processed))).Nanoseconds()
-		summary.MedLatencyProcessedNS = time.Duration(utils.MedianDuration(processed)).Nanoseconds()
-	}
-
+	summary.AvgLatencyReceivedNS, summary.MedLatencyReceivedNS = meanAndMedian(s.LatenciesReceived)
+	summary.AvgLatencyProcessedNS, summary.MedLatencyProcessedNS = meanAndMedian(s.LatenciesProcessed)
 	return summary
+}
+
+// meanAndMedian returns the mean and the median of samples in nanoseconds,
+// without reordering samples.
+func meanAndMedian(samples []time.Duration) (int64, int64) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	var total time.Duration
+	for _, sample := range samples {
+		total += sample
+	}
+	median := time.Duration(utils.MedianDuration(slices.Clone(samples)))
+	return (total / time.Duration(len(samples))).Nanoseconds(), median.Nanoseconds()
 }
 
 func (s *Stats) JSON() string {
@@ -917,14 +921,12 @@ func (m *Monitor) ProcessEvents(
 			actions, err := m.ProcessEvent(event.Event)
 			if err != nil {
 				if errors.Is(err, ErrNoApplicableRule) {
-					end := time.Now()
-					m.stats.EndTime = end
 					result.Violation = &ViolationInfo{
 						Err:        err,
 						ErrorKind:  ViolationKindNoApplicableRule,
 						TimedEvent: cloneTimedEvent(event),
 						EventIndex: len(m.stats.LatenciesReceived),
-						Stats:      m.stats.Summary(end),
+						Stats:      m.stats.Summary(time.Now()),
 					}
 				} else {
 					result.Err = fmt.Errorf("process event %s: %w", event.Event, err)
@@ -979,6 +981,9 @@ func (m *Monitor) logFinalConfigs() {
 	}
 }
 
+// cloneTimedEvent copies the event of a violation. The copy gives every
+// function a non-nil argument list, so that the event of a violation
+// encodes a function without arguments with "args": [].
 func cloneTimedEvent(event *TimedEvent) *TimedEvent {
 	if event == nil {
 		return nil

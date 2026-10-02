@@ -30,6 +30,8 @@ import (
 	"github.com/specmon/specmon/term"
 )
 
+// Run monitors the events of r and hands each consumed event to
+// onConsumed. It closes r and returns the first violation, or an error.
 func (m *Monitor) Run(
 	ctx context.Context,
 	r io.ReadCloser,
@@ -38,6 +40,9 @@ func (m *Monitor) Run(
 	return runMonitor(ctx, m, r, false, nil, onConsumed)
 }
 
+// Rewrite processes the events of r with rewrite rules and hands each
+// output event to onOutput. It closes r. A violation is returned as an
+// error.
 func (m *Monitor) Rewrite(
 	ctx context.Context,
 	r io.ReadCloser,
@@ -140,22 +145,17 @@ func runMonitor(
 			if !stopping && onConsumed != nil {
 				recordError(onConsumed(event))
 			}
-		case result, ok := <-terminal:
-			if !ok {
-				processTerminal = nil
-				continue
-			}
+		case result := <-terminal:
+			// The processor and the parser each send one result.
+			processTerminal = nil
 			if result.Violation != nil {
 				violation = result.Violation
 				stop()
 			} else {
 				recordError(result.Err)
 			}
-		case err, ok := <-parseTerminal:
-			if !ok {
-				parseTerminal = nil
-				continue
-			}
+		case err := <-parseTerminal:
+			parseTerminal = nil
 			if err != nil && !stopping && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 				parseErr = err
 				continue
@@ -176,6 +176,9 @@ func runMonitor(
 	return nil, parseErr
 }
 
+// RunPipeline rewrites the events of r with rewriter and monitors the
+// outputs with main, handing each consumed event to onConsumed. It closes
+// r and returns the first violation of main, or an error.
 func RunPipeline(
 	ctx context.Context,
 	rewriter *Monitor,
