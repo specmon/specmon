@@ -291,6 +291,76 @@ func TestRunCancellationClosesBlockingInput(t *testing.T) {
 	}
 }
 
+// stuckReader returns its data once and then blocks until the test ends,
+// whether or not it is closed, like a read from a pipe or a terminal.
+type stuckReader struct {
+	data     []byte
+	readOnce sync.Once
+	release  chan struct{}
+}
+
+func newStuckReader(t *testing.T, data []byte) *stuckReader {
+	r := &stuckReader{data: data, release: make(chan struct{})}
+	t.Cleanup(func() { close(r.release) })
+	return r
+}
+
+func (r *stuckReader) Read(p []byte) (int, error) {
+	read := false
+	r.readOnce.Do(func() {
+		read = true
+	})
+	if read {
+		return copy(p, r.data), nil
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+func (r *stuckReader) Close() error {
+	return nil
+}
+
+func TestRunReportsViolationWhileReadBlocks(t *testing.T) {
+	t.Parallel()
+
+	reader := newStuckReader(t, runnerEventLine(t, runnerEvent(runnerOutputEventName, term.NewConstant(1))))
+	type result struct {
+		violation *monitor.ViolationInfo
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		violation, err := acceptingRunnerMonitor(t).Run(context.Background(), reader, nil)
+		done <- result{violation, err}
+	}()
+	select {
+	case got := <-done:
+		if got.violation == nil || got.err != nil {
+			t.Fatalf("Run = (%v, %v), want the violation", got.violation, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run waits for the blocked read after the violation")
+	}
+}
+
+func TestRunReportsViolationBeforeLaterParseError(t *testing.T) {
+	t.Parallel()
+
+	for _, accepted := range []int{0, 10, 200, 2000} {
+		var input strings.Builder
+		for i := range accepted {
+			input.Write(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant(i))))
+		}
+		input.Write(runnerEventLine(t, runnerEvent(runnerOutputEventName, term.NewConstant(1))))
+		input.WriteString("{\"time\": 1, \"event\": \n")
+		violation, err := acceptingRunnerMonitor(t).Run(context.Background(), io.NopCloser(strings.NewReader(input.String())), nil)
+		if violation == nil || err != nil || violation.EventIndex != accepted+1 {
+			t.Fatalf("%d accepted events: Run = (%+v, %v), want the violation at event %d", accepted, violation, err, accepted+1)
+		}
+	}
+}
+
 func TestRunPreservesStatsAndClassifiesAcceptedHintViolations(t *testing.T) {
 	t.Parallel()
 

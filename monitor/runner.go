@@ -84,6 +84,10 @@ func runMonitor(
 	var violation *ViolationInfo
 	var ordinaryErr error
 	var callerErr error
+	// parseErr is a failure to read or parse the input. The events parsed
+	// before it are still processed, so that a violation among them is
+	// reported instead of the parse error.
+	var parseErr error
 	recordError := func(err error) {
 		if err == nil {
 			return
@@ -104,7 +108,10 @@ func runMonitor(
 		stop()
 	}
 
-	for outputs != nil || consumed != nil || processTerminal != nil || parseTerminal != nil {
+	// Once stopping, the loop does not wait for the parser: a read from a
+	// pipe or terminal does not return when the input is closed, and the
+	// parser ends on its own when its read returns.
+	for outputs != nil || consumed != nil || processTerminal != nil || (parseTerminal != nil && !stopping) {
 		select {
 		case <-callerDone:
 			callerErr = ctx.Err()
@@ -142,6 +149,10 @@ func runMonitor(
 				parseTerminal = nil
 				continue
 			}
+			if err != nil && !stopping && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+				parseErr = err
+				continue
+			}
 			recordError(err)
 		}
 	}
@@ -155,7 +166,7 @@ func runMonitor(
 	if callerErr != nil {
 		return nil, callerErr
 	}
-	return nil, nil
+	return nil, parseErr
 }
 
 func RunPipeline(
