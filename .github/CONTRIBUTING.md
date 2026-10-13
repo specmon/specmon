@@ -118,6 +118,11 @@ on a later day, correct the date in `CHANGELOG.md` and in the PR body.
 ### Version in dev builds
 
 `specmon --version` prints `dev` for binaries built with `go build .`.
+`make build` sets it to the output of `git describe` without the leading `v`:
+the release version at a release tag, otherwise the nearest release version,
+the number of commits since it and the full commit hash, followed by `-dirty`
+if tracked files are modified. `make build` does not run `go mod tidy`;
+`make tidy` does.
 Release builds print the release version (e.g., `0.3.0`) via GoReleaser ldflags.
 
 ## Need Help?
