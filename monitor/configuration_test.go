@@ -180,7 +180,7 @@ func TestConfigHashCacheInvalidated(t *testing.T) {
 // so we measure the full recomputation path.
 func BenchmarkConfigHashCold(b *testing.B) {
 	c := monitor.NewConfig()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.AddFact(newFFact(term.NewConstant("v"), term.NewConstant(int64(i))))
 	}
 	// Warm one fact so we can re-add it cheaply.
@@ -199,7 +199,7 @@ func BenchmarkConfigHashCold(b *testing.B) {
 // branch.
 func BenchmarkConfigHashHot(b *testing.B) {
 	c := monitor.NewConfig()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		c.AddFact(newFFact(term.NewConstant("v"), term.NewConstant(int64(i))))
 	}
 	_ = c.Hash() // warm cache
@@ -352,7 +352,7 @@ func TestConfigStringDeterministic(t *testing.T) {
 	// Stronger: identical configs must stringify identically across
 	// multiple calls on the same receiver (Go map iteration is
 	// randomised per-iteration even for an unchanged map).
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if c1.String() != c2.String() {
 			t.Errorf("String() non-deterministic across calls at i=%d", i)
 		}

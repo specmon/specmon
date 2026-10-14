@@ -229,7 +229,7 @@ func assertRulesEqual(t *testing.T, expected, actual []*rule.Rule) {
 	expectedSorted := sortRulesByName(expected)
 	actualSorted := sortRulesByName(actual)
 
-	for i := 0; i < len(expectedSorted); i++ {
+	for i := range expectedSorted {
 		expectedRule := expectedSorted[i]
 		actualRule := actualSorted[i]
 

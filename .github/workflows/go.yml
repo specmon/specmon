@@ -40,6 +40,11 @@ jobs:
           cache: 'true'
           cache-dependency-path: '**/*.sum'
 
+      - name: Check go fix
+        run: |
+          go fix ./...
+          git diff --exit-code
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:

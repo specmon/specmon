@@ -22,7 +22,7 @@ const fnv64Prime = 1099511628211
 
 // FNV64aUint64 hashes a uint64 into the provided FNV-1a state (little-endian).
 func FNV64aUint64(h uint64, v uint64) uint64 {
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		h ^= uint64(byte(v))
 		h *= fnv64Prime
 		v >>= 8

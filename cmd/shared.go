@@ -86,12 +86,12 @@ func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // addFlagsFromStruct adds flags to the given command from the given struct.
-func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
+func addFlagsFromStruct(cmd *cobra.Command, cfg any) {
 	t := reflect.TypeOf(cfg)
 	v := reflect.ValueOf(cfg)
 
 	// If cfg is a pointer, get the type of the value it points to
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		v = v.Elem()
 	}
@@ -122,7 +122,7 @@ func addFlagsFromStruct(cmd *cobra.Command, cfg interface{}) {
 			value := int(fieldValue.Int())
 			cmd.PersistentFlags().IntVarP(fieldValue.Addr().Interface().(*int), flag, short, value, desc)
 		case reflect.Int64:
-			if fieldValue.Type() == reflect.TypeOf(time.Duration(0)) {
+			if fieldValue.Type() == reflect.TypeFor[time.Duration]() {
 				value := time.Duration(fieldValue.Int())
 				cmd.PersistentFlags().DurationVarP(fieldValue.Addr().Interface().(*time.Duration), flag, short, value, desc)
 			}

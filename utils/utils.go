@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,7 +33,7 @@ import (
 // Indent indents a string by n spaces.
 func Indent(s string, n int) string {
 	var b strings.Builder
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		b.WriteString(strings.Repeat(" ", n))
 		b.WriteString(line)
 		b.WriteString("\n")
@@ -155,7 +155,7 @@ func KillProcess(pid int) error {
 }
 
 func MedianDuration(numbers []time.Duration) float64 {
-	sort.Slice(numbers, func(i, j int) bool { return numbers[i] < numbers[j] })
+	slices.Sort(numbers)
 	middle := len(numbers) / 2
 	if len(numbers)%2 == 0 {
 		return float64(numbers[middle-1]+numbers[middle]) / 2

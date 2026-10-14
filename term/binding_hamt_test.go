@@ -36,13 +36,13 @@ import (
 func TestBindingHAMTLargeInsertGet(t *testing.T) {
 	b := term.NewBinding()
 	const N = 512
-	for i := 0; i < N; i++ {
+	for i := range N {
 		b.Set(term.NewVariable(fmt.Sprintf("v%d", i)), term.NewConstant(int64(i)))
 	}
 	if b.Size() != N {
 		t.Fatalf("Size: got %d, want %d", b.Size(), N)
 	}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		v, ok := b.Get(term.NewVariable(fmt.Sprintf("v%d", i)))
 		if !ok {
 			t.Errorf("Get(v%d): miss", i)
@@ -84,7 +84,7 @@ func TestBindingHAMTOverwriteSameKey(t *testing.T) {
 func TestBindingHAMTRemove(t *testing.T) {
 	b := term.NewBinding()
 	const N = 64
-	for i := 0; i < N; i++ {
+	for i := range N {
 		b.Set(term.NewVariable(fmt.Sprintf("v%d", i)), term.NewConstant(int64(i)))
 	}
 	// Remove every odd entry.
@@ -95,7 +95,7 @@ func TestBindingHAMTRemove(t *testing.T) {
 	if b.Size() != want {
 		t.Fatalf("Size after Remove: got %d, want %d", b.Size(), want)
 	}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		_, ok := b.Get(term.NewVariable(fmt.Sprintf("v%d", i)))
 		if i%2 == 0 && !ok {
 			t.Errorf("v%d should still be present", i)
@@ -112,7 +112,7 @@ func TestBindingHAMTRemove(t *testing.T) {
 // (HAMT mutations are path-copying).
 func TestBindingHAMTCloneIndependence(t *testing.T) {
 	src := term.NewBinding()
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		src.Set(term.NewVariable(fmt.Sprintf("v%d", i)), term.NewConstant(int64(i)))
 	}
 	srcSize := src.Size()
@@ -151,7 +151,7 @@ func TestBindingHAMTIterateAll(t *testing.T) {
 	b := term.NewBinding()
 	const N = 100
 	want := map[string]int64{}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		name := fmt.Sprintf("v%d", i)
 		b.Set(term.NewVariable(name), term.NewConstant(int64(i)))
 		want[name] = int64(i)
@@ -177,10 +177,10 @@ func TestBindingHAMTIterateAll(t *testing.T) {
 func TestBindingHAMTEmptyAfterAllRemoved(t *testing.T) {
 	b := term.NewBinding()
 	const N = 32
-	for i := 0; i < N; i++ {
+	for i := range N {
 		b.Set(term.NewVariable(fmt.Sprintf("v%d", i)), term.NewConstant(int64(i)))
 	}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		b.Remove(term.NewVariable(fmt.Sprintf("v%d", i)))
 	}
 	if !b.Empty() {

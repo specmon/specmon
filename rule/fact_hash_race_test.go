@@ -51,12 +51,10 @@ func TestFactHashConcurrentAccess(t *testing.T) {
 	var mu sync.Mutex
 	var hashes []uint64
 
-	for g := 0; g < goroutines; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			var last uint64
-			for i := 0; i < iterations; i++ {
+			for range iterations {
 				h := f.Hash()
 				if h == 0 {
 					t.Errorf("Hash() returned 0; sentinel-collision path?")
@@ -71,7 +69,7 @@ func TestFactHashConcurrentAccess(t *testing.T) {
 			mu.Lock()
 			hashes = append(hashes, last)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 

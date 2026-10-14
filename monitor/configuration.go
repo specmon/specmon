@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -196,9 +197,7 @@ func (c *Config) Clone() *Config {
 	// on its first mutation per bucket.
 	if len(c.factsByName) > 0 {
 		d.factsByName = make(map[string][]*rule.Fact, len(c.factsByName))
-		for k, v := range c.factsByName {
-			d.factsByName[k] = v
-		}
+		maps.Copy(d.factsByName, c.factsByName)
 	}
 
 	// Symmetric step: relinquish ownership on the source. Any bucket

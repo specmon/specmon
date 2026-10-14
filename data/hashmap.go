@@ -22,7 +22,8 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -56,7 +57,7 @@ func (h *HashMap[K, V]) hash(k K) uint64 {
 	case fmt.Stringer:
 		b = []byte(t.String())
 	default:
-		b = []byte(fmt.Sprintf("%v", k))
+		b = fmt.Appendf(nil, "%v", k)
 	}
 
 	h.h.Reset()
@@ -136,9 +137,7 @@ func (h *HashMap[K, V]) IterateSorted(f func(K, V) bool) {
 		keys = append(keys, k)
 	}
 
-	sort.Slice(keys, func(i, j int) bool {
-		return keys[i] < keys[j]
-	})
+	slices.Sort(keys)
 
 	for _, k := range keys {
 		entry := h.m[k]
@@ -153,9 +152,7 @@ func (h *HashMap[K, V]) Clone() *HashMap[K, V] {
 		m: make(map[uint64]Entry[K, V], len(h.m)),
 	}
 
-	for k, v := range h.m {
-		c.m[k] = v
-	}
+	maps.Copy(c.m, h.m)
 
 	return c
 }
@@ -163,9 +160,7 @@ func (h *HashMap[K, V]) Clone() *HashMap[K, V] {
 func (h *HashMap[K, V]) Extend(hp *HashMap[K, V]) *HashMap[K, V] {
 	u := h.Clone()
 
-	for k, v := range hp.m {
-		u.m[k] = v
-	}
+	maps.Copy(u.m, hp.m)
 
 	return u
 }
