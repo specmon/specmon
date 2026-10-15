@@ -41,6 +41,19 @@ Before decomposition, a conclusion that no premise consumes is dropped, and a fu
 - **no_decomp_attribute**: Tests rules with the `[no-decomp]` attribute
 - **existing_triggers**: Tests that rules with existing triggers should NOT be decomposed
 - **existing_hints**: Tests that rules with existing hints should NOT be decomposed
+- **single_leaf**: One innermost computation shared by two outer ones: no
+  start rule, and an end rule without a trigger
+- **single_root_child**: Two innermost computations below one outer
+  computation: a start rule with hints, and an end rule triggered by the
+  outer computation
+- **neither**: Several innermost and outermost computations: a start rule,
+  one rule per computation and an end rule without a trigger
+- **live_conclusion**: A conclusion that another rule consumes is rebuilt
+  by the end rule from the results of the computations
+
+The computations of `simple_function` form a chain, so both boundaries are
+fused: the rule of the innermost computation matches the premises, and the
+end rule is triggered by the outermost one.
 
 ## Running Tests
 

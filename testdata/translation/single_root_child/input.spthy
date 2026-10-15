@@ -1,0 +1,7 @@
+theory SingleRootChild
+begin
+
+rule R:
+  [ In($x, $y) ] --> [ Out(f(g($x), h($y))) ]
+
+end

@@ -1,0 +1,26 @@
+theory SingleRootChild
+begin
+
+rule R_Start [ hint=[<g($x), g_x>, <h($y), h_y>] ]:
+  [ In($x, $y) ]
+  -->
+  [ ST_R_g_x_Pre(<$x, $y>)
+  , ST_R_h_y_Pre(<$x, $y>) ]
+
+rule R_0 [ trigger=[<h($y), h_y>] ]:
+  [ ST_R_h_y_Pre(<$x, $y>) ]
+  -->
+  [ ST_R_h_y(<$x, $y>, h($y)) ]
+
+rule R_1 [ trigger=[<g($x), g_x>] ]:
+  [ ST_R_g_x_Pre(<$x, $y>) ]
+  -->
+  [ ST_R_g_x(<$x, $y>, g($x)) ]
+
+rule R_End [ trigger=[<f(g_x, h_y), f_g_x_h_y>] ]:
+  [ ST_R_g_x(<$x, $y>, g_x)
+  , ST_R_h_y(<$x, $y>, h_y) ]
+  -->
+  [ Compute_(f_g_x_h_y) ]
+
+end

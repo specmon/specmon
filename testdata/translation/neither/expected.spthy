@@ -1,0 +1,32 @@
+theory Neither
+begin
+
+rule R_Start [ hint=[<hmac(k), hm_k>, <hash(m), h_m>] ]:
+  [ In(m, k) ]
+  -->
+  [ ST_R_h_m_Pre(<m, k>)
+  , ST_R_hm_k_Pre(<m, k>) ]
+
+rule R_0 [ trigger=[<hmac(k), hm_k>] ]:
+  [ ST_R_hm_k_Pre(<m, k>) ]
+  -->
+  [ ST_R_hm_k(<m, k>, hmac(k)) ]
+
+rule R_1 [ trigger=[<len(h_m), l_h_m>] ]:
+  [ ST_R_h_m(<m, k>, h_m) ]
+  -->
+  [ ST_R_l_h_m(<m, k>, len(h_m)) ]
+
+rule R_2 [ trigger=[<hash(m), h_m>] ]:
+  [ ST_R_h_m_Pre(<m, k>) ]
+  -->
+  [ ST_R_h_m(<m, k>, hash(m)) ]
+
+rule R_End:
+  [ ST_R_hm_k(<m, k>, hm_k)
+  , ST_R_l_h_m(<m, k>, l_h_m) ]
+  -->
+  [ Compute_(hm_k)
+  , Compute_(l_h_m) ]
+
+end

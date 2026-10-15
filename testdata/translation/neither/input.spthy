@@ -1,0 +1,7 @@
+theory Neither
+begin
+
+rule R:
+  [ In(m, k) ] --> [ Out(len(hash(m))), Out2(hmac(k)), State1(m, k) ]
+
+end

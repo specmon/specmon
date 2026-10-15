@@ -1,0 +1,7 @@
+theory SingleLeaf
+begin
+
+rule R:
+  [ In($x) ] --> [ Out(f(g($x))), Out2(h(g($x))) ]
+
+end

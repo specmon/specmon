@@ -20,7 +20,9 @@ package rule
 
 import (
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/specmon/specmon/data"
@@ -40,6 +42,113 @@ const (
 )
 
 type TermNode = data.DAGNode[term.Term, term.Term]
+
+// translationCtx holds the state shared by the steps of one translation.
+type translationCtx struct {
+	rule        *Rule                   // the source rule, never mutated
+	dag         *TermNode               // root of the rule's DAG
+	names       *NameGenerator          // deterministic name generator
+	original    map[*TermNode]term.Term // node terms before labeling
+	funcBinding *term.Binding           // original function to its label variable
+	parentCount map[*TermNode]int       // next index of a node with several parents
+}
+
+// stFactName builds the standardized ST fact name for a decomposed rule.
+func stFactName(ruleName, termName string) string {
+	return fmt.Sprintf("%s_%s_%s", SubtermName, ruleName, termName)
+}
+
+// stFactNameIndexed builds a disambiguated ST fact name for multi-parent nodes.
+func stFactNameIndexed(ruleName, termName string, index int) string {
+	return fmt.Sprintf("%s_%s_%s_%d", SubtermName, ruleName, termName, index)
+}
+
+// replaceFunctionsWithVars clones the given facts and replaces all function
+// subterms that appear in the binding with their corresponding variables.
+func replaceFunctionsWithVars(facts []*Fact, binding *term.Binding) []*Fact {
+	cloned := make([]*Fact, len(facts))
+	for i, f := range facts {
+		args := make([]term.Term, len(f.Args))
+		for j, arg := range f.Args {
+			args[j] = term.FindReplaceBy(arg, func(t term.Term) bool {
+				_, ok := binding.Get(t)
+				return ok
+			}, func(t term.Term) term.Term {
+				v, _ := binding.Get(t)
+				return v
+			})
+		}
+		cloned[i] = NewFact(f.Name, args, f.Type)
+	}
+	return cloned
+}
+
+// buildMidRuleLHS constructs the facts that the rule of DAG node d
+// consumes, one for each child of d.
+func buildMidRuleLHS(ctx *translationCtx, d *TermNode) []*Fact {
+	lhs := make([]*Fact, d.Children().Size())
+	for i, c := range d.Children().AsSlice() {
+		// A pre-fact, the only child reached by an edge without a label,
+		// precedes the computation of its term, whose public variables are
+		// therefore not bound yet. Its name is already based on its term.
+		name := term.Must(term.AsFunction(c.Value())).Name
+		args := []term.Term{term.NewFunction(term.PairFunctionName, carriedVars(ctx.rule, nil))}
+		if w := d.Label(c); w != nil {
+			orig := originalTerm(ctx.original, c)
+			name = ctx.names.NameForTerm(orig)
+			args = []term.Term{term.NewFunction(term.PairFunctionName, carriedVars(ctx.rule, orig)), w}
+		}
+
+		factName := stFactName(ctx.rule.Name, name)
+		if c.Parents().Size() > 1 {
+			factName = stFactNameIndexed(ctx.rule.Name, name, ctx.parentCount[c])
+			ctx.parentCount[c]++
+		}
+
+		lhs[i] = NewFact(factName, args, LinearFact)
+	}
+	return lhs
+}
+
+// buildMidRuleRHS constructs the RHS facts for a mid rule at DAG node d.
+func buildMidRuleRHS(ctx *translationCtx, d *TermNode) []*Fact {
+	f := term.Must(term.AsFunction(d.Value()))
+	orig := originalTerm(ctx.original, d)
+	termName := ctx.names.NameForTerm(orig)
+	fVars := carriedVars(ctx.rule, orig)
+
+	rhs := make([]*Fact, d.Parents().Size())
+	for i := range d.Parents().AsSlice() {
+		var factName string
+		if d.Parents().Size() > 1 {
+			factName = stFactNameIndexed(ctx.rule.Name, termName, i)
+		} else {
+			factName = stFactName(ctx.rule.Name, termName)
+		}
+		rhs[i] = NewFact(factName, []term.Term{
+			term.NewFunction(term.PairFunctionName, fVars),
+			term.NewFunction(f.Name, f.Args),
+		}, LinearFact)
+	}
+	return rhs
+}
+
+// computationRule returns the rule that computes the term of DAG node d,
+// whose result is the label w, from the facts lhs.
+func computationRule(ctx *translationCtx, d *TermNode, w term.Term, lhs []*Fact) *Rule {
+	return &Rule{
+		LHS:   lhs,
+		Act:   []*Fact{},
+		RHS:   buildMidRuleRHS(ctx, d),
+		Attrs: map[string]Attribute{TriggerAttributeName: TermAttribute{computation(d, w)}},
+	}
+}
+
+// computation returns the trigger or hint term for the computation of the
+// term of DAG node d, whose result is the label w.
+func computation(d *TermNode, w term.Term) []term.Term {
+	return []term.Term{term.NewFunction(term.PairFunctionName, []term.Term{d.Value(), w})}
+}
 
 func BuildDAGForRule(r *Rule) *TermNode {
 	// Assumptions:
@@ -67,130 +176,48 @@ func BuildDAGForRule(r *Rule) *TermNode {
 	return root
 }
 
-// GenerateStartRule returns a new rule with the following properties:
-//  1. The LHS contains all facts from the LHS of r.
-//  2. The RHS contains a pre-fact for each leaf of D, which carries
-//     the premise variables of r.
-func GenerateStartRule(r *Rule, D *TermNode, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
-	ruleVars := carriedVars(r, nil)
-
-	rhs := make([]*Fact, len(D.Leaves()))
-	hints := make([]term.Term, len(D.Leaves()))
-	for i, leaf := range D.Leaves() {
+// generateStartRule returns a start rule with hints for each leaf function.
+func generateStartRule(ctx *translationCtx) *Rule {
+	// Every leaf is a pre-fact, and its parent is the function to compute.
+	leaves := ctx.dag.Leaves()
+	rhs := make([]*Fact, len(leaves))
+	var hints []term.Term
+	for i, leaf := range leaves {
 		f := term.Must(term.AsFunction(leaf.Value()))
-		termName := f.Name
-		if !strings.HasSuffix(termName, PreFactSuffix) {
-			termName = termNameForNode(names, original, leaf)
-		}
-		rhs[i] = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
-			term.NewFunction(term.PairFunctionName, ruleVars),
-		},
-			LinearFact,
-		)
-
-		// f is the pre fact added by AddPreFacts.
-		// The function symbol of the pre fact is the parent of the leaf.
-		// By construction their is exactly one.
-		p := leaf.Parents().AsSlice()[0]
-		g := term.Must(term.AsFunction(p.Value()))
-
-		// The result variable of the function is the label of the leaf's parent.
-		v := p.LabeldBy()[0]
-
-		hints[i] = term.NewFunction(term.PairFunctionName, []term.Term{g, v})
-	}
-
-	endRule := &Rule{
-		Name:  StartRuleSuffix,
-		LHS:   r.LHS,
-		Act:   []*Fact{},
-		RHS:   rhs,
-		Attrs: map[string]Attribute{},
-	}
-
-	endRule.Attrs[HintAttributeName] = TermAttribute{hints}
-
-	return endRule
-}
-
-// GenerateEndRule returns a new rule with the following properties:
-//
-//	TODO
-func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
-	lhs := make([]*Fact, D.Children().Size())
-	for i, d := range D.Children().AsSlice() {
-		u := U[d]
-		termName := termNameForNode(names, original, d)
-		// LabelSubterms labels every child of the root.
-		g := NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
-			term.NewFunction(term.PairFunctionName, carriedVars(r, originalTerm(original, d))),
-			D.Label(d),
+		rhs[i] = NewFact(stFactName(ctx.rule.Name, f.Name), []term.Term{
+			term.NewFunction(term.PairFunctionName, carriedVars(ctx.rule, nil)),
 		}, LinearFact)
 
-		if d.Parents().Size() > 1 {
-			g.Name = fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, u)
-		}
-
-		lhs[i] = g
-	}
-
-	// Replace functions in r.RHS with variables.
-	for i := range r.RHS {
-		for j := range r.RHS[i].Args {
-			r.RHS[i].Args[j] = term.FindReplaceBy(r.RHS[i].Args[j], func(t term.Term) bool {
-				f, err := term.AsFunction(t)
-				if err != nil {
-					return false
-				}
-
-				_, ok := F.Get(f)
-
-				return ok
-			}, func(t term.Term) term.Term {
-				f := term.Must(term.AsFunction(t))
-				v, ok := F.Get(f)
-
-				if ok {
-					return v
-				}
-
-				return t
-			})
-		}
-	}
-
-	// Replace functions in r.Act with variables.
-	for i := range r.Act {
-		for j := range r.Act[i].Args {
-			r.Act[i].Args[j] = term.FindReplaceBy(r.Act[i].Args[j], func(t term.Term) bool {
-				f, err := term.AsFunction(t)
-				if err != nil {
-					return false
-				}
-
-				_, ok := F.Get(f)
-
-				return ok
-			}, func(t term.Term) term.Term {
-				f := term.Must(term.AsFunction(t))
-				v, ok := F.Get(f)
-
-				if ok {
-					return v
-				}
-
-				return t
-			})
-		}
+		p := leaf.Parents().AsSlice()[0]
+		hints = append(hints, computation(p, p.LabeldBy()[0])...)
 	}
 
 	return &Rule{
-		Name:  EndRuleSuffix,
-		LHS:   lhs,
-		Act:   r.Act,
-		RHS:   r.RHS,
-		Attrs: r.Attrs,
+		Name:  StartRuleSuffix,
+		LHS:   slices.Clone(ctx.rule.LHS),
+		Act:   []*Fact{},
+		RHS:   rhs,
+		Attrs: map[string]Attribute{HintAttributeName: TermAttribute{hints}},
 	}
+}
+
+// generateEndRule returns the end rule, which rebuilds the conclusions and
+// actions of the source rule from the facts of the root's children. If
+// fused is not nil, it is the single child of the root, whose rule is
+// merged into the end rule: the end rule consumes the facts of its children
+// and is triggered by its computation instead of being an epsilon rule.
+func generateEndRule(ctx *translationCtx, fused *TermNode) *Rule {
+	end := ctx.rule.Clone()
+	end.Name = EndRuleSuffix
+	end.RHS = replaceFunctionsWithVars(ctx.rule.RHS, ctx.funcBinding)
+	end.Act = replaceFunctionsWithVars(ctx.rule.Act, ctx.funcBinding)
+	if fused == nil {
+		end.LHS = buildMidRuleLHS(ctx, ctx.dag)
+	} else {
+		end.LHS = buildMidRuleLHS(ctx, fused)
+		end.Attrs[TriggerAttributeName] = TermAttribute{computation(fused, ctx.dag.Label(fused))}
+	}
+	return end
 }
 
 func BuildDAG(n *TermNode) {
@@ -242,7 +269,7 @@ func ReplaceSubterms(n *TermNode, b *term.Binding) {
 	})
 }
 
-func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
+func Translate(r *Rule) []*Rule {
 	combinedFacts := make([]*Fact, 0, len(r.RHS)+len(r.Act))
 	combinedFacts = append(combinedFacts, r.RHS...)
 	combinedFacts = append(combinedFacts, r.Act...)
@@ -254,14 +281,18 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 
 	// Build a dependency graph for the rule r.
 	// Work on a copy of r to avoid modifying the original rule.
-	D := BuildDAGForRule(r.Clone())
+	dag := BuildDAGForRule(r.Clone())
 
-	// Remove constants and variables from D.
-	RemoveConstants(D)
-	RemoveVariables(D)
+	// Remove constants and variables from the DAG.
+	removeConstants(dag)
+	removeVariables(dag)
+
+	// Labeling and replacing subterms keep the topology, so the depth
+	// computed here stays valid.
+	depth := dag.Depth()
 
 	// If the depth of the DAG is 0, no decomposition is needed.
-	if D.Depth() == 0 {
+	if depth == 0 {
 		return []*Rule{r}
 	}
 
@@ -271,28 +302,23 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 	// LabelSubterms/ReplaceSubterms mutate them. Pointer identity of
 	// *TermNode keys is stable because DAG operations don't reallocate
 	// existing nodes.
-	original := snapshotTerms(D)
+	original := snapshotTerms(dag)
 
 	// Label subterms with variables.
-	F := term.NewBinding()
-	LabelSubterms(D, F, names, original)
+	funcBinding := term.NewBinding()
+	LabelSubterms(dag, funcBinding, names, original)
 
 	// Replace subterms with variables.
-	ReplaceSubterms(D, F)
+	ReplaceSubterms(dag, funcBinding)
 
-	// If the depth of the DAG is 1, we only need to add
-	// the required triggers.
-	if D.Depth() == SingleRuleDepth {
+	// If the depth of the DAG is 1, we only need to add the required triggers.
+	if depth == SingleRuleDepth {
 		var triggers []term.Term
-		for _, c := range D.Children().AsSlice() {
-			f := term.Must(term.AsFunction(c.Value()))
-			if w := D.Label(c); w != nil {
-				triggers = append(triggers, term.NewFunction(term.PairFunctionName, []term.Term{f, w}))
-			}
+		for _, c := range dag.Children().AsSlice() {
+			triggers = append(triggers, computation(c, dag.Label(c))...)
 		}
 
-		// Sort triggers so the output is deterministic regardless of
-		// the order that RHS/Act facts were listed in the original rule.
+		// Sort triggers for deterministic output.
 		sort.Slice(triggers, func(i, j int) bool {
 			return triggers[i].String() < triggers[j].String()
 		})
@@ -303,161 +329,103 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 		return []*Rule{R}
 	}
 
-	// Add pre facts
-	AddPreFacts(D, names, original)
+	ctx := &translationCtx{
+		rule:        r,
+		dag:         dag,
+		names:       names,
+		original:    original,
+		funcBinding: funcBinding,
+		parentCount: make(map[*TermNode]int),
+	}
 
-	var R []*Rule
-	U := make(map[*TermNode]int)
+	var rules []*Rule
+	if leaves := dag.Leaves(); len(leaves) == 1 && len(r.LHS) > 0 {
+		// With a single leaf there is nothing to look ahead for, so the
+		// start rule is fused with the leaf's rule: it matches the
+		// premises of r and is triggered by the leaf computation. No
+		// pre-facts are needed. A rule without premises keeps its start
+		// rule, a hint rule that loading rejects, whatever the number of
+		// its innermost computations.
+		rules = append(rules, computationRule(ctx, leaves[0], leaves[0].LabeldBy()[0], slices.Clone(r.LHS)))
+	} else {
+		addPreFacts(dag, names, original)
+		rules = append(rules, generateStartRule(ctx))
+	}
 
-	// Generate rules for the DAG.
-	R = append(R, GenerateStartRule(r, D, names, original))
-	R = append(R, GenerateMidRules(r, D, U, names, original)...)
-	R = append(R, GenerateEndRule(r, D, U, F, names, original))
+	// With a single root child, the rule of that child is fused with the
+	// end rule, which is then triggered by the child's computation
+	// instead of being an epsilon rule.
+	var fused *TermNode
+	if dag.Children().Size() == 1 {
+		fused = dag.Children().AsSlice()[0]
+	}
+
+	rules = append(rules, generateMidRules(ctx, fused)...)
+	rules = append(rules, generateEndRule(ctx, fused))
 
 	// Prefix generated rule names with the name of rule r.
 	var count int
-	for _, t := range R {
+	for _, t := range rules {
 		if t.Name == "" {
-			// For mid rules.
 			t.Name = fmt.Sprintf("%s_%d", r.Name, count)
 			count++
 		} else {
-			// For start and end rules.
 			t.Name = fmt.Sprintf("%s_%s", r.Name, t.Name)
 		}
 		SortRule(t)
 	}
 
-	return R
-}
-
-func RemoveVariables(D *TermNode) *TermNode {
-	D.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, _ term.Term, _ int) bool {
-		if d.Value() != nil && d.Value().GetType() == term.VariableType {
-			d.Remove()
-		}
-
-		return true
-	})
-
-	return D
-}
-
-func RemoveConstants(D *TermNode) *TermNode {
-	D.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, _ term.Term, _ int) bool {
-		if d.Value() != nil && d.Value().GetType() == term.ConstantType {
-			d.Remove()
-		}
-
-		return true
-	})
-
-	return D
-}
-
-func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, names *NameGenerator, original map[*TermNode]term.Term) []*Rule {
-	var rules []*Rule
-
-	D.Traverse(data.TraverseDown, data.TraverseBFS, true, func(d *TermNode, w term.Term, _ int) bool {
-		// Leave nodes are already handled by their parent nodes.
-		if d.Value() == nil || d.Children().Empty() {
-			return true
-		}
-
-		f := term.Must(term.AsFunction(d.Value()))
-
-		fVars := carriedVars(r, originalTerm(original, d))
-
-		// The RHS contains an instance of the function fact for each parent.
-		rhs := make([]*Fact, d.Parents().Size())
-		for i := range d.Parents().AsSlice() {
-			var g *Fact
-			termName := termNameForNode(names, original, d)
-			if d.Parents().Size() > 1 {
-				g = NewFact(fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, i), []term.Term{
-					term.NewFunction(term.PairFunctionName, fVars),
-					term.NewFunction(f.Name, f.Args),
-				}, LinearFact)
-			} else {
-				g = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
-					term.NewFunction(term.PairFunctionName, fVars),
-					term.NewFunction(f.Name, f.Args),
-				}, LinearFact)
-			}
-
-			rhs[i] = g
-		}
-
-		lhs := make([]*Fact, d.Children().Size())
-		for i, c := range d.Children().AsSlice() {
-			f := term.Must(term.AsFunction(c.Value()))
-
-			// A pre-fact is named after its term and precedes the
-			// computation of the term, whose public variables are
-			// therefore not bound yet.
-			fName, fVars := f.Name, carriedVars(r, nil)
-			if !strings.HasSuffix(f.Name, PreFactSuffix) {
-				fName, fVars = termNameForNode(names, original, c), carriedVars(r, originalTerm(original, c))
-			}
-
-			args := []term.Term{
-				term.NewFunction(term.PairFunctionName, fVars),
-			}
-
-			if retVar := d.Label(c); retVar != nil {
-				args = append(args, retVar)
-			}
-
-			factName := fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, fName)
-
-			if c.Parents().Size() > 1 {
-				i := U[c]
-				factName = fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, fName, i)
-				U[c]++
-			}
-
-			lhs[i] = NewFact(factName, args, LinearFact)
-		}
-
-		R := &Rule{
-			Name:  "",
-			LHS:   lhs,
-			Act:   []*Fact{},
-			RHS:   rhs,
-			Attrs: make(map[string]Attribute),
-		}
-
-		var triggers []term.Term
-		if w != nil {
-			triggers = []term.Term{term.NewFunction(term.PairFunctionName, []term.Term{f, w})}
-		}
-
-		R.Attrs[TriggerAttributeName] = TermAttribute{triggers}
-
-		rules = append(rules, R)
-
-		return true
-	})
-
 	return rules
 }
 
-// AddPreFacts adds Pre facts for all leave nodes that are observable.
-func AddPreFacts(D *TermNode, names *NameGenerator, original map[*TermNode]term.Term) *TermNode {
-	D.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, w term.Term, _ int) bool {
+// removeVariables removes all variable nodes from the DAG in place.
+func removeVariables(dag *TermNode) {
+	dag.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, _ term.Term, _ int) bool {
+		if d.Value() != nil && d.Value().GetType() == term.VariableType {
+			d.Remove()
+		}
+		return true
+	})
+}
+
+// removeConstants removes all constant nodes from the DAG in place.
+func removeConstants(dag *TermNode) {
+	dag.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, _ term.Term, _ int) bool {
+		if d.Value() != nil && d.Value().GetType() == term.ConstantType {
+			d.Remove()
+		}
+		return true
+	})
+}
+
+// generateMidRules produces intermediate trigger rules for the DAG.
+// No rule is generated for fused, which is merged into the end rule.
+func generateMidRules(ctx *translationCtx, fused *TermNode) []*Rule {
+	var rules []*Rule
+	ctx.dag.Traverse(data.TraverseDown, data.TraverseBFS, true, func(d *TermNode, w term.Term, _ int) bool {
+		// Leaf nodes are handled by their parent nodes.
+		if d.Value() != nil && !d.Children().Empty() && d != fused {
+			rules = append(rules, computationRule(ctx, d, w, buildMidRuleLHS(ctx, d)))
+		}
+		return true
+	})
+	return rules
+}
+
+// addPreFacts adds Pre facts for all leaf nodes that are observable.
+// It mutates the DAG in place.
+func addPreFacts(dag *TermNode, names *NameGenerator, original map[*TermNode]term.Term) {
+	dag.Traverse(data.TraverseDown, data.TraverseDFS, true, func(d *TermNode, w term.Term, _ int) bool {
 		// If the node is a leaf, we add a pre fact.
 		// w != nil ensures that we don't run into an endless loop.
 		if d.Children().Empty() && w != nil {
 			f := term.Must(term.AsFunction(d.Value()))
 			name := names.NameForTerm(originalTerm(original, d))
-			g := term.NewFunction(name+"_Pre", term.AsTerms(term.Terms(f.Args).Vars()))
+			g := term.NewFunction(name+ComponentSep+PreFactSuffix, term.AsTerms(term.Terms(f.Args).Vars()))
 			d.AddChildren(data.NewDAGNode[term.Term, term.Term](g))
 		}
-
 		return true
 	})
-
-	return D
 }
 
 func FindTerm(n *TermNode, arg term.Term) *TermNode {
@@ -487,17 +455,6 @@ func originalTerm(original map[*TermNode]term.Term, node *TermNode) term.Term {
 	return node.Value()
 }
 
-func termNameForNode(names *NameGenerator, original map[*TermNode]term.Term, node *TermNode) string {
-	if names == nil {
-		return ""
-	}
-	t := originalTerm(original, node)
-	if t == nil {
-		return ""
-	}
-	return names.NameForTerm(t)
-}
-
 // carriedVars returns the variables that the ST_ fact of a DAG node carries
 // through the chain of split rules: the non-public premise variables, then
 // the public premise variables, then the public variables of the node's
@@ -523,18 +480,24 @@ func carriedVars(r *Rule, t term.Term) []term.Term {
 	return term.AsTerms(utils.Unique(append(nonPublic, public...)))
 }
 
-// FIXME: Find a place for this function.
-// IsStartRuleOf returns true if r1 is the start rule of r2.
+// IsStartRuleOf returns true if r1 is the start rule of the source rule
+// that r2 was generated from. Generated rules are named after their source
+// rule, followed by the start or end suffix or by a step number in decimal
+// without leading zeros.
 func IsStartRuleOf(r1, r2 *Rule) bool {
-	// If r1 is not a start rule or r2 is an end rule, return false.
-	if !strings.HasSuffix(r1.Name, ComponentSep+StartRuleSuffix) ||
-		strings.HasSuffix(r2.Name, ComponentSep+EndRuleSuffix) {
+	source, ok := strings.CutSuffix(r1.Name, ComponentSep+StartRuleSuffix)
+	if !ok {
 		return false
 	}
-
-	ruleName := strings.TrimSuffix(r1.Name, StartRuleSuffix)
-
-	return strings.HasPrefix(r2.Name, ruleName)
+	suffix, ok := strings.CutPrefix(r2.Name, source+ComponentSep)
+	if !ok {
+		return false
+	}
+	if suffix == StartRuleSuffix || suffix == EndRuleSuffix {
+		return true
+	}
+	number, err := strconv.ParseUint(suffix, 10, 0)
+	return err == nil && strconv.FormatUint(number, 10) == suffix
 }
 
 // MatchesSplitStateName recognizes the end-rule and split-state naming

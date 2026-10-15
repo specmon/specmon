@@ -255,7 +255,8 @@ func assertRulesEqual(t *testing.T, expected, actual []*rule.Rule) {
 
 // carriedTupleTestRules are source rules whose split-rule chains carry
 // public variables: nested below the first of several computations, at
-// increasing depths, under a shared subterm, and in the premise.
+// increasing depths, under a shared subterm, in the premise, and below a
+// function whose name ends like that of a pre-fact.
 var carriedTupleTestRules = map[string]string{
 	"nested below the first computation": `
 rule Send:
@@ -279,6 +280,8 @@ rule R: [St(k)] --> [Out(h(g(f(k, $x))), i(g(f(k, $x))))]`,
 rule R: [St($p, k)] --> [Out(h(g(f(k, $x)), $p))]`,
 	"repeated": `
 rule R: [St($p, k)] --> [Out(h(g(k, $x, $x, $p)), $x)]`,
+	"function named like a pre-fact": `
+rule R: [St(k)] --> [Out(h(gPre(f(k, $x)), i(k)))]`,
 }
 
 // assertCarriedTuplesConsistent checks that every ST_ fact is produced and

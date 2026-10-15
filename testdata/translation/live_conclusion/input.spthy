@@ -1,0 +1,10 @@
+theory LiveConclusion
+begin
+
+rule TestRule:
+  [ State0(m) ] --> [ Out(len(hash(m))), State0(hash(m)) ]
+
+rule Send [ trigger=[<send(x), r>] ]:
+  [ Out(x) ] --> [ ]
+
+end

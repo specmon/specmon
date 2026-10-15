@@ -1254,10 +1254,14 @@ func checkWellformedness(rules []*rule.Rule) error {
 //  1. No epsilon rule has a premise that an epsilon step can produce. The
 //     conclusions of epsilon rules count as produced, and so do those of
 //     every rule with a computation, since the canonical split form
-//     produces them in the rule's end rule. A conclusion matches a premise
-//     with its name and arity. The split state that the end rule of a
-//     decomposed rule consumes comes from the other split rules of that
-//     rule and does not count.
+//     produces them in the rule's end rule. So do those of an end rule
+//     fused with the rule of its last computation, which consumes an
+//     event but is an epsilon rule in the canonical split form. It is
+//     named after its source rule with the end rule suffix and consumes
+//     split-state facts. A conclusion matches a premise with its name and
+//     arity. The split state that the end rule of a decomposed rule
+//     consumes comes from the other split rules of that rule and does not
+//     count.
 //  2. Every epsilon rule has a linear premise, so that its application
 //     disables it.
 //
@@ -1276,8 +1280,12 @@ func checkEpsilonRules(rules []*rule.Rule) error {
 	producers := make(map[signature]producer)
 	for _, r := range rules {
 		epsilon := r.IsEpsilon()
+		name := r.Name
 		if !epsilon && !r.HasComputation() {
-			continue
+			if !slices.ContainsFunc(r.LHS, r.MatchesSplitStateName) {
+				continue
+			}
+			name = strings.TrimSuffix(r.Name, rule.ComponentSep+rule.EndRuleSuffix)
 		}
 		for _, f := range r.RHS {
 			if rule.IsInternalFactName(f.Name) {
@@ -1286,7 +1294,7 @@ func checkEpsilonRules(rules []*rule.Rule) error {
 			// An epsilon producer explains the violation more directly.
 			key := signature{f.Name, len(f.Args)}
 			if p, ok := producers[key]; !ok || (epsilon && !p.epsilon) {
-				producers[key] = producer{rule: r.Name, epsilon: epsilon}
+				producers[key] = producer{rule: name, epsilon: epsilon}
 			}
 		}
 	}

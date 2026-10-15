@@ -54,6 +54,8 @@ SpecMon handles this by **decomposing** rules that contain function applications
 - One or more **mid rules** each annotated with a single `trigger`
 - An **end rule** that completes the original conclusion (often with no trigger)
 
+Two of these boundaries are fused when keeping them apart gains nothing. If the rule has premises and a single innermost computation, there is nothing to look ahead for: the start rule is left out, and the rule of that computation matches the premises of the original rule. A rule without premises keeps its start rule. If the conclusions and actions together have a single outermost computation, its rule and the end rule become one rule, triggered by that computation. A chain such as `Out(f(g(x)))` therefore becomes two rules. With an action that computes something else, such as `--[ Log(h(x)) ]->`, it stays split.
+
 ### Example: decomposition and dependencies
 
 Given the rule:
