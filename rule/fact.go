@@ -94,7 +94,7 @@ func (f *Fact) String() string {
 }
 
 func (f *Fact) Equal(f1 *Fact) bool {
-	if f.Name != f1.Name {
+	if f.Type != f1.Type || f.Name != f1.Name {
 		return false
 	}
 

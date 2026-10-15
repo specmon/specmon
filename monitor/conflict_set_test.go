@@ -70,30 +70,6 @@ func TestConflictSetFactsSingleVariableFact(t *testing.T) {
 	}
 }
 
-// TestConflictSetFactsDuplicateCap checks the body-slot dedup cap: two body
-// slots requesting Out(x), Out(y) against three identical Out facts should
-// still enumerate the pairings the uncapped code would, and capping past the
-// slot count must not drop a reachable binding.
-func TestConflictSetFactsDuplicateCap(t *testing.T) {
-	body := []*rule.Fact{
-		rule.NewFact("Out", []term.Term{term.NewVariable("x")}, rule.LinearFact),
-		rule.NewFact("Out", []term.Term{term.NewVariable("y")}, rule.LinearFact),
-	}
-	// Three identical facts; body needs at most 2 of them.
-	facts := []*rule.Fact{
-		rule.NewFact("Out", []term.Term{term.NewConstant("v")}, rule.LinearFact),
-		rule.NewFact("Out", []term.Term{term.NewConstant("v")}, rule.LinearFact),
-		rule.NewFact("Out", []term.Term{term.NewConstant("v")}, rule.LinearFact),
-	}
-
-	got := conflictSetFacts(facts, body)
-	// x and y each bind to the single distinct value "v"; the multiset yields
-	// exactly one distinct binding {x->v, y->v}.
-	if got.Empty() {
-		t.Fatalf("duplicate cap: got 0 bindings, want at least 1")
-	}
-}
-
 // TestBindingTrailOverwriteRestore pins the trail invariant the DFS relies on:
 // Mark, mutate (including overwriting an existing key), then Unwind must
 // restore the binding exactly, byte for byte.
@@ -233,16 +209,27 @@ func TestConflictSetFactsForConfigPrefilterKeepsBindings(t *testing.T) {
 			body[i] = rule.NewFact(name, args, randomPrefilterFactType(r))
 		}
 
-		// The unfiltered item list, in the order conflictSetFactsForConfig
-		// visits the buckets.
+		// The unfiltered item list with as many copies of every fact as
+		// body has patterns of its name, in the order
+		// conflictSetFactsForConfig visits the buckets and their entries.
 		var items []*rule.Fact
 		visited := map[string]bool{}
 		for _, p := range body {
 			if !visited[p.Name] {
 				visited[p.Name] = true
 				bucket := c.factsByName[p.Name]
-				items = append(items, bucket...)
-				if kept := appendConstCandidates(nil, bucket, body, p.Name); len(kept) < len(bucket) {
+				slots := 0
+				for _, q := range body {
+					if q.Name == p.Name {
+						slots++
+					}
+				}
+				for _, e := range bucket.entries {
+					for range min(e.count, slots) {
+						items = append(items, e.fact)
+					}
+				}
+				if kept := appendConstCandidates(nil, bucket, body, p.Name, bucket.total); len(kept) < bucket.total {
 					filtered++
 				}
 			}

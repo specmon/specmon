@@ -319,3 +319,30 @@ func TestMacroSubstitutionBeforeUnification(t *testing.T) {
 		t.Fatalf("macro did not substitute its parameter: %s", got)
 	}
 }
+
+func TestFactEqualityKindAndCoercion(t *testing.T) {
+	a := term.NewConstant("ab")
+	linear := rule.NewFact("State", []term.Term{a}, rule.LinearFact)
+	persistent := rule.NewFact("State", []term.Term{a}, rule.PersistentFact)
+	if linear.Equal(persistent) || persistent.Equal(linear) {
+		t.Error("Fact.Equal ignores persistence kind")
+	}
+	integer := term.NewConstant[int64](1)
+	encoded, err := term.AsBytes(integer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, values := range [][2]term.Term{
+		{a, term.NewConstant([]byte("ab"))},
+		{integer, term.NewConstant(encoded)},
+		{term.NewFunction("f", []term.Term{a}), term.NewFunction("f", []term.Term{term.NewConstant([]byte("ab"))})},
+	} {
+		for _, kind := range []rule.FactType{rule.LinearFact, rule.PersistentFact} {
+			left := rule.NewFact("State", []term.Term{values[0]}, kind)
+			right := rule.NewFact("State", []term.Term{values[1]}, kind)
+			if !left.Equal(right) || !right.Equal(left) || left.Hash() != right.Hash() {
+				t.Fatalf("kind-only fix changed constant equality/hash: %v,%v", left, right)
+			}
+		}
+	}
+}

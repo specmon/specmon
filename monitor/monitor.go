@@ -127,16 +127,18 @@ type Monitor struct {
 	stats *Stats
 }
 
-// computeRequirements returns the per-predicate-name count of facts the
-// rule's LHS demands. A rule whose LHS asks for two instances of
-// State() and one of Out() has needCount{"State": 2, "Out": 1}.
+// computeRequirements returns a lower bound on each predicate's stored
+// occurrences. Linear premises count separately. Persistent premises of
+// one name count once because matching may reuse the same stored fact.
 func computeRequirements(lhs []*rule.Fact) map[string]int {
 	if len(lhs) == 0 {
 		return nil
 	}
 	needCount := make(map[string]int, len(lhs))
-	for _, f := range lhs {
-		if f == nil {
+	for i, f := range lhs {
+		if f == nil || f.IsPersistent() && slices.ContainsFunc(lhs[:i], func(g *rule.Fact) bool {
+			return g != nil && g.IsPersistent() && g.Name == f.Name
+		}) {
 			continue
 		}
 		needCount[f.Name]++

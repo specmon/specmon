@@ -20,6 +20,7 @@ package monitor
 
 import (
 	"math"
+	"slices"
 	"sort"
 
 	log "github.com/sirupsen/logrus"
@@ -253,7 +254,9 @@ func constantByteLen(t term.Term) (int, bool) {
 	}
 }
 
-func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, name func(T) string, args func(T) []term.Term) *bindingSet {
+// conflictSetSingle matches a single pattern p against items. If
+// persistent is not nil, p matches only items of its kind.
+func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, name func(T) string, args func(T) []term.Term, persistent func(T) bool) *bindingSet {
 	result := newBindingSet()
 
 	pArgs := args(p)
@@ -272,6 +275,9 @@ func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, nam
 			if !indexable(item) || name(item) != pName || len(itemArgs) != len(pArgs) {
 				continue
 			}
+		}
+		if persistent != nil && persistent(item) != persistent(p) {
+			continue
 		}
 
 		// Only apply the argument prefilter when the pattern actually carries a
@@ -295,11 +301,22 @@ func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, nam
 	return result
 }
 
-func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name func(T) string, args func(T) []term.Term, hash func(T) uint64, equal func(a, b T) bool) *bindingSet {
+// conflictSet matches the patterns of body against items, using every item
+// at most once per binding. If persistent is not nil, a pattern matches
+// only items of its kind, and a persistent item may serve several patterns
+// of one binding. A match does not consume it.
+func conflictSet[T Unifier[T]](
+	items []T,
+	body []T,
+	indexable func(T) bool,
+	name func(T) string,
+	args func(T) []term.Term,
+	persistent func(T) bool,
+) *bindingSet {
 	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
 	if len(body) == 1 {
-		return conflictSetSingle(items, body[0], indexable, name, args)
+		return conflictSetSingle(items, body[0], indexable, name, args, persistent)
 	}
 
 	constraintsByBody := make([]argConstraints, len(body))
@@ -308,123 +325,9 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 	}
 	needsByKey, needAllIndices := collectIndexNeeds(body, indexable, name, constraintsByBody)
 
-	// Count how many body slots reference each (name, arity) key. The DFS
-	// can never consume more instances of a key than there are body slots
-	// requesting it, so any multiset multiplicity beyond that count is
-	// wasted iteration. We cap each duplicate group at min(count, slots).
-	bodySlotCount := make(map[conflictKey]int, len(needsByKey))
-	for i, p := range body {
-		if !indexable(p) {
-			continue
-		}
-		k := conflictKey{name: name(p), arity: constraintsByBody[i].arity}
-		bodySlotCount[k]++
-	}
-
-	// Build a virtual items slice that drops duplicate instances beyond the
-	// body slot cap for their (name, arity) key. Items that aren't
-	// indexable, or whose key isn't referenced by any body pattern, pass
-	// through unchanged so the !indexable(p) fallback path still works.
-	var virtualItems []T
-	if hash != nil && equal != nil {
-		virtualItems = make([]T, 0, len(items))
-		// firstByKey[key][hash] is the virtual index of the FIRST item we
-		// admitted at that (key, hash). In the common case (no hash
-		// collisions across distinct items) this is the only structure
-		// we need. dupCount[vIdx] tracks how many copies of the unique
-		// fact first seen at vIdx have been admitted so far. extraByKey
-		// only allocates when a hash already has a non-equal item, to
-		// hold the additional virtual indices for distinct-but-colliding
-		// items.
-		firstByKey := make(map[conflictKey]map[uint64]int)
-		var dupCount map[int]int                        // lazy: most slotCaps are 1
-		var extraByKey map[conflictKey]map[uint64][]int // lazy: rare collisions
-
-		for _, item := range items {
-			if !indexable(item) {
-				virtualItems = append(virtualItems, item)
-				continue
-			}
-			key := conflictKey{name: name(item), arity: len(args(item))}
-			slotCap := bodySlotCount[key]
-			if slotCap == 0 {
-				// No body slot consumes this key.
-				virtualItems = append(virtualItems, item)
-				continue
-			}
-			h := hash(item)
-			byHash := firstByKey[key]
-			if byHash == nil {
-				byHash = make(map[uint64]int)
-				firstByKey[key] = byHash
-			}
-			firstIdx, hashSeen := byHash[h]
-			if !hashSeen {
-				// First time we see this hash at this key. Admit.
-				byHash[h] = len(virtualItems)
-				virtualItems = append(virtualItems, item)
-				continue
-			}
-			// Check whether this item duplicates the first one at this hash.
-			if equal(virtualItems[firstIdx], item) {
-				if dupCount == nil {
-					dupCount = make(map[int]int)
-				}
-				c := dupCount[firstIdx]
-				if c == 0 {
-					c = 1 // implicit count for the first admission
-				}
-				if c >= slotCap {
-					continue // at cap, drop
-				}
-				dupCount[firstIdx] = c + 1
-				virtualItems = append(virtualItems, item)
-				continue
-			}
-			// Hash collision with a different item. Check extraByKey
-			// for prior collisions; admit if none match.
-			if extraByKey == nil {
-				extraByKey = make(map[conflictKey]map[uint64][]int)
-			}
-			extras := extraByKey[key]
-			if extras == nil {
-				extras = make(map[uint64][]int)
-				extraByKey[key] = extras
-			}
-			matched := -1
-			for _, vIdx := range extras[h] {
-				if equal(virtualItems[vIdx], item) {
-					matched = vIdx
-					break
-				}
-			}
-			if matched >= 0 {
-				if dupCount == nil {
-					dupCount = make(map[int]int)
-				}
-				c := dupCount[matched]
-				if c == 0 {
-					c = 1
-				}
-				if c >= slotCap {
-					continue
-				}
-				dupCount[matched] = c + 1
-				virtualItems = append(virtualItems, item)
-				continue
-			}
-			// Genuinely new collision-distinct item. Record and admit.
-			vNew := len(virtualItems)
-			extras[h] = append(extras[h], vNew)
-			virtualItems = append(virtualItems, item)
-		}
-	} else {
-		virtualItems = items
-	}
-
-	// Index virtual items by name+arity and per-argument constants.
+	// Index items by name+arity and per-argument constants.
 	itemsByKey := make(map[conflictKey]*itemBucket, len(needsByKey))
-	for i, item := range virtualItems {
+	for i, item := range items {
 		if !indexable(item) {
 			continue
 		}
@@ -474,8 +377,8 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	var allIndices []int
 	if needAllIndices {
-		allIndices = make([]int, len(virtualItems))
-		for j := range virtualItems {
+		allIndices = make([]int, len(items))
+		for j := range items {
 			allIndices[j] = j
 		}
 	}
@@ -502,6 +405,12 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 			// Fallback: no indexing possible, scan all items.
 			candIndices = allIndices
 		}
+		if persistent != nil {
+			otherKind := func(idx int) bool { return persistent(items[idx]) != persistent(p) }
+			if slices.ContainsFunc(candIndices, otherKind) {
+				candIndices = slices.DeleteFunc(slices.Clone(candIndices), otherKind)
+			}
+		}
 
 		if len(constraints.constPositions) == 0 && !constraints.hasDisallowConstant && !constraints.hasFormatConstraints {
 			prefilter[i] = candIndices
@@ -511,7 +420,7 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 		filtered := make([]int, 0, len(candIndices))
 		for _, idx := range candIndices {
-			fArgs := args(virtualItems[idx])
+			fArgs := args(items[idx])
 			if constraints.matchesArgs(fArgs) {
 				filtered = append(filtered, idx)
 			}
@@ -525,12 +434,12 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 
 	result := newBindingSet()
 
-	// Track which virtual items have been used in the current DFS path.
-	// This ensures multiset semantics s.t. each (possibly deduped+capped)
-	// virtual instance can only be consumed once per binding path.
+	// Track which items have been used in the current DFS path. This
+	// ensures multiset semantics s.t. each item can only be consumed once
+	// per binding path. Persistent items are never marked used.
 	// Use a binding trail (mark/unwind) so the DFS reuses one mutable binding
 	// instead of cloning at every branch.
-	usedItems := make([]bool, len(virtualItems))
+	usedItems := make([]bool, len(items))
 	trail := term.NewBindingTrail()
 
 	var dfs func(pos int, b *term.Binding)
@@ -547,12 +456,12 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 		psArgs := args(ps)
 
 		for _, itemIdx := range prefilter[idx] {
-			// Skip if this virtual item has already been used in this binding path
+			// Skip if this item has already been used in this binding path
 			if usedItems[itemIdx] {
 				continue
 			}
 
-			f := virtualItems[itemIdx]
+			f := items[itemIdx]
 			fArgs := args(f)
 			if len(psArgs) == len(fArgs) {
 				skip := false
@@ -572,12 +481,17 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 			if err != nil {
 				continue
 			}
-			usedItems[itemIdx] = true
+			reuse := persistent != nil && persistent(f)
+			if !reuse {
+				usedItems[itemIdx] = true
+			}
 			mark := trail.Mark()
 			b.MergeWithTrail(delta, trail)
 			dfs(pos+1, b)
 			b.Unwind(trail, mark)
-			usedItems[itemIdx] = false
+			if !reuse {
+				usedItems[itemIdx] = false
+			}
 		}
 	}
 
@@ -586,15 +500,15 @@ func conflictSet[T Unifier[T]](items []T, body []T, indexable func(T) bool, name
 }
 
 // conflictSetFacts matches a sequence of fact patterns against a multiset of facts.
-// It builds a per-predicate local index, deduplicates identical facts up to the
-// per-predicate body slot count, and uses DFS with early filtering by constants.
+// It builds a per-predicate local index and uses DFS with early filtering by
+// constants. A pattern matches only facts of its kind. A linear fact is used
+// by at most one pattern per binding. A persistent fact may be used by several.
 func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
 	return conflictSet(facts, body,
 		func(_ *rule.Fact) bool { return true },
 		func(f *rule.Fact) string { return f.Name },
 		func(f *rule.Fact) []term.Term { return f.Args },
-		func(f *rule.Fact) uint64 { return f.Hash() },
-		func(a, b *rule.Fact) bool { return a.Equal(b) },
+		(*rule.Fact).IsPersistent,
 	)
 }
 
@@ -603,19 +517,25 @@ func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
 // buckets a body pattern references, skipping facts whose predicate the
 // rule's LHS never mentions. For configs with thousands of unrelated
 // facts this keeps the conflict-set pre-pass O(|interesting facts|)
-// instead of O(|all facts|).
+// instead of O(|all facts|). A fact with several copies appears at most
+// as often as body has patterns of its name, which is all that the
+// conflict set can use, so many copies cost as little as one.
 func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
-	// Collect the distinct predicate names referenced by body patterns.
-	// Most rules have only a handful, so a small set suffices.
-	seen := make(map[string]struct{}, len(body))
+	// Bodies have a handful of patterns, so scanning them is cheaper than
+	// building maps of their names.
 	var items []*rule.Fact
-	for _, p := range body {
+	for i, p := range body {
 		name := p.Name
-		if _, ok := seen[name]; ok {
+		if slices.ContainsFunc(body[:i], func(q *rule.Fact) bool { return q.Name == name }) {
 			continue
 		}
-		seen[name] = struct{}{}
-		items = appendConstCandidates(items, c.factsByName[name], body, name)
+		slots := 0
+		for _, q := range body[i:] {
+			if q.Name == name {
+				slots++
+			}
+		}
+		items = appendConstCandidates(items, c.factsByName[name], body, name, slots)
 	}
 	return conflictSetFacts(items, body)
 }
@@ -626,18 +546,30 @@ const constCandidateMinBucket = 32
 
 // appendConstCandidates appends the facts of bucket that can match at least
 // one body pattern named name, judged by the argument checks of matchesArgs.
-// If some pattern with that name has no constant argument, the whole bucket
-// is appended.
+// A fact with several copies is appended at most slots times. If some
+// pattern with that name has no constant argument, the whole bucket is
+// appended.
 //
 // Otherwise conflictSet applies matchesArgs to every candidate of these
 // patterns, so it could not match a dropped fact. The kept facts stay in
-// bucket order, so the bindings and their order are unchanged. The filter
-// keeps the per-call deduplication and indexing of conflictSet
-// proportional to the candidates instead of the whole bucket, which
-// matters for large persistent buckets.
-func appendConstCandidates(items, bucket []*rule.Fact, body []*rule.Fact, name string) []*rule.Fact {
-	if len(bucket) < constCandidateMinBucket {
-		return append(items, bucket...)
+// bucket order, so filtering changes neither the bindings nor their order
+// compared with appending the whole bucket. The filter keeps the per-call
+// indexing of conflictSet proportional to the candidates instead of the
+// whole bucket, which matters for large persistent buckets.
+func appendConstCandidates(items []*rule.Fact, bucket factBucket, body []*rule.Fact, name string, slots int) []*rule.Fact {
+	appendEntry := func(e factEntry) {
+		for range min(e.count, slots) {
+			items = append(items, e.fact)
+		}
+	}
+	appendAll := func() []*rule.Fact {
+		for _, e := range bucket.entries {
+			appendEntry(e)
+		}
+		return items
+	}
+	if len(bucket.entries) < constCandidateMinBucket {
+		return appendAll()
 	}
 	var patterns []argConstraints
 	for _, p := range body {
@@ -646,14 +578,14 @@ func appendConstCandidates(items, bucket []*rule.Fact, body []*rule.Fact, name s
 		}
 		constraints := buildArgConstraints(p.Args)
 		if len(constraints.constPositions) == 0 {
-			return append(items, bucket...)
+			return appendAll()
 		}
 		patterns = append(patterns, constraints)
 	}
-	for _, f := range bucket {
+	for _, e := range bucket.entries {
 		for i := range patterns {
-			if patterns[i].matchesArgs(f.Args) {
-				items = append(items, f)
+			if patterns[i].matchesArgs(e.fact.Args) {
+				appendEntry(e)
 				break
 			}
 		}

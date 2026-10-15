@@ -36,16 +36,21 @@ import (
 // Config is a configuration of the monitor.
 //
 // Facts are stored bucketed by predicate name in factsByName; there is no
-// separate flat slice. CountByName / FactsByName / conflict-set callers
-// all go through the bucketed view. The total fact count is tracked
-// incrementally in factCount so AddFact/DeleteFact don't have to sum
-// buckets, and Facts() materialises a flat view only on demand.
+// separate flat slice. CountByName / FactsAsSliceWithName / conflict-set
+// callers all go through the bucketed view. A bucket holds one entry per
+// distinct fact with the number of its copies: a linear fact keeps its
+// multiplicity as a count, and a persistent fact has one copy. Facts that
+// are equal share an entry, which keeps the representation of the first
+// one added. The total fact count, counting copies, is tracked
+// incrementally in factCount and per bucket, so AddFact/DeleteFact don't
+// have to sum buckets, and Facts() materialises a flat view only on
+// demand.
 //
 // Clone is SYMMETRIC copy-on-write: when c.Clone() returns d, BOTH
-// configs share the same bucket slice headers AND both have
-// ownedBuckets cleared. The first AddFact / DeleteFact on either side
-// allocates a fresh bucket via ensureOwned and records ownership on
-// that side only. The other side keeps the original shared array.
+// configs share the same entry arrays AND both have ownedBuckets cleared.
+// The first AddFact / DeleteFact on either side copies the entries via
+// ownedBucket and records ownership on that side only. The other side
+// keeps the original shared entries.
 // This keeps Clone O(distinct predicate names) and amortises bucket
 // copies to actual mutations, while ruling out the silent-corruption
 // hazard where the source mutates a bucket the clone still references.
@@ -53,16 +58,17 @@ type Config struct {
 	// factsByName buckets facts by predicate name so conflictSetFacts can
 	// iterate only the relevant predicate. Maintained incrementally by
 	// AddFact / DeleteFact / Clone.
-	factsByName map[string][]*rule.Fact
+	factsByName map[string]factBucket
 
-	// ownedBuckets[name] is true when this Config owns the slice header
-	// at factsByName[name] and is free to mutate it (append in place,
-	// slices.Delete). A bucket not in ownedBuckets is shared with the
-	// Clone source and must be copied before mutation.
+	// ownedBuckets[name] is true when this Config owns the bucket at
+	// factsByName[name] and is free to mutate it (append in place, change
+	// a count, slices.Delete). A bucket not in ownedBuckets is shared with
+	// the Clone source and must be copied before mutation.
 	ownedBuckets map[string]bool
 
-	// factCount is the total number of facts across all buckets, kept in
-	// sync with factsByName so callers don't have to sum bucket sizes.
+	// factCount is the total number of facts across all buckets, counting
+	// copies, kept in sync with factsByName so callers don't have to sum
+	// bucket sizes.
 	factCount int
 
 	// seen is a multiset of events that have been seen in the current configuration
@@ -82,6 +88,22 @@ type Config struct {
 	// must call invalidateHash().
 	hashCache    uint64
 	hashCacheSet bool
+}
+
+// factEntry is a distinct stored fact and the number of its copies. A
+// persistent fact has exactly one copy.
+type factEntry struct {
+	fact  *rule.Fact
+	count int
+}
+
+// factBucket holds the entries of one predicate name in the order in which
+// their facts were first added, and the number of copies they hold
+// together. Buckets are stored by value, so each configuration has its own
+// total. Only the entries array is shared between clones.
+type factBucket struct {
+	entries []factEntry
+	total   int
 }
 
 type pendingApplication struct {
@@ -115,7 +137,7 @@ func (p pendingApplication) hash() uint64 {
 // NewConfig returns a new configuration.
 func NewConfig() *Config {
 	return &Config{
-		factsByName:  make(map[string][]*rule.Fact),
+		factsByName:  make(map[string]factBucket),
 		ownedBuckets: make(map[string]bool),
 		seen:         []term.Term{},
 		pending:      []pendingApplication{},
@@ -123,51 +145,77 @@ func NewConfig() *Config {
 	}
 }
 
-// ensureOwned returns a slice for predicate name that the caller is free
-// to mutate. If the current bucket is shared with a Clone source, it's
-// copied first.
-func (c *Config) ensureOwned(name string) []*rule.Fact {
-	if c.ownedBuckets[name] {
-		return c.factsByName[name]
+// ownedBucket returns the bucket for predicate name with entries that the
+// caller is free to mutate. The zero bucket if there is none. If the
+// entries are shared with a Clone source, they're copied first. The caller
+// stores the changed bucket back into factsByName.
+func (c *Config) ownedBucket(name string) factBucket {
+	bucket := c.factsByName[name]
+	if !c.ownedBuckets[name] {
+		bucket.entries = slices.Clone(bucket.entries)
+		c.ownedBuckets[name] = true
 	}
-	bucket := slices.Clone(c.factsByName[name])
-	c.factsByName[name] = bucket
-	c.ownedBuckets[name] = true
 	return bucket
 }
 
-// Facts materialises the flat fact list by concatenating every bucket.
-// The returned slice is freshly allocated; the order is bucket-iteration
-// order (Go map iteration, not insertion order).
-func (c *Config) Facts() []*rule.Fact {
-	out := make([]*rule.Fact, 0, c.factCount)
-	for _, bucket := range c.factsByName {
-		out = append(out, bucket...)
+// appendFacts appends every copy of every fact in b to out.
+func (b factBucket) appendFacts(out []*rule.Fact) []*rule.Fact {
+	for _, e := range b.entries {
+		for range e.count {
+			out = append(out, e.fact)
+		}
 	}
 	return out
 }
 
+// Facts materialises the flat fact list by concatenating every bucket,
+// with one element per copy. The returned slice is freshly allocated. The
+// order is bucket-iteration order (Go map iteration, not insertion order).
+func (c *Config) Facts() []*rule.Fact {
+	out := make([]*rule.Fact, 0, c.factCount)
+	for _, bucket := range c.factsByName {
+		out = bucket.appendFacts(out)
+	}
+	return out
+}
+
+// indexOfFact returns the index of the entry in entries that holds the same
+// fact as t, or -1. Hashes are compared first. Fact.Hash covers the name,
+// kind and arguments.
+func indexOfFact(entries []factEntry, t *rule.Fact) int {
+	h := t.Hash()
+	return slices.IndexFunc(entries, func(e factEntry) bool {
+		return e.fact.Hash() == h && e.fact.Equal(t)
+	})
+}
+
+// DeleteFact removes one occurrence of t, which must have the same kind as
+// the stored fact: a linear fact never removes a persistent one.
 func (c *Config) DeleteFact(t *rule.Fact) bool {
 	bucket, ok := c.factsByName[t.Name]
 	if !ok {
 		return false
 	}
-	i := slices.IndexFunc(bucket, func(s *rule.Fact) bool {
-		return t.Equal(s)
-	})
+	i := indexOfFact(bucket.entries, t)
 	if i == -1 {
 		return false
 	}
 
-	// Take ownership before mutating in place. ensureOwned returns the
-	// (possibly copied) slice we should now update; the prior i is still
-	// valid because the indices match up to the deletion point.
-	bucket = c.ensureOwned(t.Name)
-	bucket = slices.Delete(bucket, i, i+1)
-	if len(bucket) == 0 {
+	if bucket.total == 1 {
+		// The last copy: drop the bucket without copying shared entries.
 		delete(c.factsByName, t.Name)
 		delete(c.ownedBuckets, t.Name)
 	} else {
+		// Take ownership before mutating in place. ownedBucket returns
+		// the (possibly copied) entries we should now update. The prior i
+		// is still valid because a copy keeps the order of the entries.
+		bucket = c.ownedBucket(t.Name)
+		if bucket.entries[i].count > 1 {
+			bucket.entries[i].count--
+		} else {
+			bucket.entries = slices.Delete(bucket.entries, i, i+1)
+		}
+		bucket.total--
 		c.factsByName[t.Name] = bucket
 	}
 	c.factCount--
@@ -178,9 +226,23 @@ func (c *Config) DeleteFact(t *rule.Fact) bool {
 	return true
 }
 
+// AddFact adds t to c. Persistent facts form a set: adding a persistent
+// fact that c already holds leaves c unchanged. Linear facts form a
+// multiset: adding a linear fact that c already holds counts another copy.
+// Finding it scans the bucket, comparing hashes first.
 func (c *Config) AddFact(t *rule.Fact) {
-	bucket := c.ensureOwned(t.Name)
-	c.factsByName[t.Name] = append(bucket, t)
+	i := indexOfFact(c.factsByName[t.Name].entries, t)
+	if i != -1 && t.IsPersistent() {
+		return
+	}
+	bucket := c.ownedBucket(t.Name)
+	if i != -1 {
+		bucket.entries[i].count++
+	} else {
+		bucket.entries = append(bucket.entries, factEntry{fact: t, count: 1})
+	}
+	bucket.total++
+	c.factsByName[t.Name] = bucket
 	c.factCount++
 	c.invalidateHash()
 }
@@ -192,18 +254,15 @@ func (c *Config) Clone() *Config {
 	d.trace = slices.Clone(c.trace)
 	d.factCount = c.factCount
 
-	// Copy the factsByName map header but share the bucket slice headers.
+	// Copy the factsByName map. The copied buckets share their entries.
 	// d.ownedBuckets is empty (set in NewConfig) so d will copy-on-write
 	// on its first mutation per bucket.
-	if len(c.factsByName) > 0 {
-		d.factsByName = make(map[string][]*rule.Fact, len(c.factsByName))
-		maps.Copy(d.factsByName, c.factsByName)
-	}
+	d.factsByName = maps.Clone(c.factsByName)
 
 	// Symmetric step: relinquish ownership on the source. Any bucket
 	// that c previously owned is now shared with d, so the next
-	// mutation on c MUST also copy first via ensureOwned. Without this
-	// reset, a subsequent c.DeleteFact would short-circuit ensureOwned
+	// mutation on c MUST also copy first via ownedBucket. Without this
+	// reset, a subsequent c.DeleteFact would short-circuit ownedBucket
 	// and slices.Delete would mutate the underlying array d still
 	// references, silently corrupting d's view.
 	//
@@ -219,27 +278,27 @@ func (c *Config) Clone() *Config {
 }
 
 // FactsAsSliceWithName returns a fresh slice of the facts whose
-// predicate name matches. The slice is independent of the Config's
-// internal bucket so callers may inspect or sort it without breaking
-// factCount, the hash cache, or copy-on-write ownership invariants.
-// Returns nil when no fact with that name exists.
+// predicate name matches, with one element per copy. The slice is
+// independent of the Config's internal bucket so callers may inspect or
+// sort it without breaking factCount, the hash cache, or copy-on-write
+// ownership invariants. Returns nil when no fact with that name exists.
 //
 // Internal call sites that need the bucket WITHOUT the per-call alloc
 // (the conflictSet hot path) read c.factsByName[name] directly.
 func (c *Config) FactsAsSliceWithName(name string) []*rule.Fact {
-	bucket := c.factsByName[name]
-	if len(bucket) == 0 {
+	bucket, ok := c.factsByName[name]
+	if !ok {
 		return nil
 	}
-	return slices.Clone(bucket)
+	return bucket.appendFacts(make([]*rule.Fact, 0, bucket.total))
 }
 
-// CountByName returns how many facts in c carry the given predicate name.
-// Used by the rule-applicability gate to skip rules whose LHS requires
-// more instances of a predicate than the config currently has. O(1)
-// via factsByName.
+// CountByName returns how many facts in c carry the given predicate name,
+// counting copies. Used by the rule-applicability gate to skip rules whose
+// LHS requires more instances of a predicate than the config currently
+// has. O(1) via factsByName.
 func (c *Config) CountByName(name string) int {
-	return len(c.factsByName[name])
+	return c.factsByName[name].total
 }
 
 // String returns a deterministic textual rendering of the config.
@@ -263,13 +322,14 @@ func (c *Config) String() string {
 
 	facts := make([]string, 0, c.factCount)
 	for _, name := range names {
-		bucket := c.factsByName[name]
+		bucket := c.factsByName[name].appendFacts(nil)
 		bucketStrs := make([]string, len(bucket))
 		for i, f := range bucket {
 			bucketStrs[i] = f.String()
 		}
-		// Within a bucket the order is also map-derived (DFS through
-		// conflictSet's binding products), so sort for stability.
+		// A bucket keeps the order in which its facts were first added,
+		// which differs between configurations with the same facts, so
+		// sort for stability.
 		sort.Strings(bucketStrs)
 		facts = append(facts, bucketStrs...)
 	}
@@ -325,10 +385,12 @@ func (c *Config) Hash() uint64 {
 		return c.hashCache
 	}
 
+	// A fact with n copies contributes n times its mixed hash, as n
+	// separately stored copies would.
 	var factsAcc uint64
 	for _, bucket := range c.factsByName {
-		for _, f := range bucket {
-			factsAcc += mix64(f.Hash())
+		for _, e := range bucket.entries {
+			factsAcc += uint64(e.count) * mix64(e.fact.Hash()) //nolint:gosec // counts are positive
 		}
 	}
 

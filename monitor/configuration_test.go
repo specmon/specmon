@@ -225,7 +225,7 @@ func hasFact(c *monitor.Config, f *rule.Fact) bool {
 // copy-on-write invariant: after c.Clone() returns d, ANY subsequent
 // mutation on c must not be observable in d. If Clone left
 // c.ownedBuckets unchanged, c.DeleteFact would short-circuit
-// ensureOwned and mutate the bucket array shared with d, corrupting
+// ownedBucket and mutate the bucket array shared with d, corrupting
 // d's view of the deleted fact.
 func TestCloneSourceMutationDoesNotCorruptClone(t *testing.T) {
 	f := newFFact(term.NewConstant("a"))
@@ -259,7 +259,7 @@ func TestCloneSourceMutationDoesNotCorruptClone(t *testing.T) {
 // TestCloneSourceAddDoesNotCorruptClone covers the AddFact path: if c
 // adds a fact AFTER cloning, the clone must not silently gain that
 // fact through a shared underlying array. AddFact uses append, which
-// CAN reuse the existing array's spare capacity; ensureOwned must
+// CAN reuse the existing array's spare capacity. OwnedBucket must
 // copy first.
 func TestCloneSourceAddDoesNotCorruptClone(t *testing.T) {
 	f := newFFact(term.NewConstant("a"))
