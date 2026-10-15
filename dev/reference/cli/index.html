@@ -347,6 +347,9 @@ recursively for every constant.</p>
 <p><strong>Monitor output</strong>:</p>
 <ul>
 <li>Prints consumed events (unless <code dir="auto">--quiet</code>) and a JSON stats summary to stdout</li>
+<li>Batches consumed-event output while events are queued, and flushes before
+waiting for more input and before statistics, violation hooks, or signal
+messages. A lone event is therefore visible while the input remains open.</li>
 <li><code dir="auto">--out</code> is reserved and currently ignored</li>
 </ul>
 <p><strong>Rewrite output (<code dir="auto">--out file.log</code>)</strong>:</p>
