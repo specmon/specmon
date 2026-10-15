@@ -67,12 +67,12 @@ func BuildDAGForRule(r *Rule) *TermNode {
 	return root
 }
 
-// StartRule returns a new rule with the following properties:
+// GenerateStartRule returns a new rule with the following properties:
 //  1. The LHS contains all facts from the LHS of r.
-//  2. The RHS contains a fact with all variables from the RHS of r
-//     and pre-facts from function symbols of depth n.
+//  2. The RHS contains a pre-fact for each leaf of D, which carries
+//     the premise variables of r.
 func GenerateStartRule(r *Rule, D *TermNode, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
-	ruleVars := nonPublicRuleVars(r)
+	ruleVars := carriedVars(r, nil)
 
 	rhs := make([]*Fact, len(D.Leaves()))
 	hints := make([]term.Term, len(D.Leaves()))
@@ -117,45 +117,15 @@ func GenerateStartRule(r *Rule, D *TermNode, names *NameGenerator, original map[
 //
 //	TODO
 func GenerateEndRule(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) *Rule {
-	ruleVars := term.AsTerms(utils.Unique(Facts(r.RHS).Vars()))
-
-	lhs := make([]*Fact, D.Roots()[0].Children().Size())
-	for i, d := range D.Roots()[0].Children().AsSlice() {
+	lhs := make([]*Fact, D.Children().Size())
+	for i, d := range D.Children().AsSlice() {
 		u := U[d]
 		termName := termNameForNode(names, original, d)
+		// LabelSubterms labels every child of the root.
 		g := NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
-			term.NewFunction(term.PairFunctionName, ruleVars),
+			term.NewFunction(term.PairFunctionName, carriedVars(r, originalTerm(original, d))),
+			D.Label(d),
 		}, LinearFact)
-
-		if retVar := D.Label(d); retVar != nil {
-			fVars := nonPublicRuleVars(r)
-
-			// Add all public variables from the original rule's LHS
-			lhsVars := utils.Unique(Facts(r.LHS).Vars())
-			for _, v := range lhsVars {
-				if v.IsPublic() {
-					fVars = append(fVars, v)
-				}
-			}
-
-			// Find orignal function in F and add public variables to the fact.
-			F.IterateSorted(func(k, v term.Term) bool {
-				if v.Equal(retVar) {
-					for _, vv := range term.Vars(k) {
-						if vv.IsPublic() {
-							fVars = append(fVars, vv)
-						}
-					}
-
-					return false
-				}
-
-				return true
-			})
-
-			g.Args[0] = term.NewFunction(term.PairFunctionName, fVars)
-			g.Args = append(g.Args, retVar)
-		}
 
 		if d.Parents().Size() > 1 {
 			g.Name = fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, u)
@@ -307,9 +277,6 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 	F := term.NewBinding()
 	LabelSubterms(D, F, names, original)
 
-	// Keep mapping of subterms to variables prior to substitution.
-	O := F.Clone()
-
 	// Replace subterms with variables.
 	ReplaceSubterms(D, F)
 
@@ -344,7 +311,7 @@ func Translate(r *Rule /*, I data.Set[string]*/) []*Rule {
 
 	// Generate rules for the DAG.
 	R = append(R, GenerateStartRule(r, D, names, original))
-	R = append(R, GenerateMidRules(r, D, U, O, names, original)...)
+	R = append(R, GenerateMidRules(r, D, U, names, original)...)
 	R = append(R, GenerateEndRule(r, D, U, F, names, original))
 
 	// Prefix generated rule names with the name of rule r.
@@ -388,10 +355,8 @@ func RemoveConstants(D *TermNode) *TermNode {
 	return D
 }
 
-func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding, names *NameGenerator, original map[*TermNode]term.Term) []*Rule {
+func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, names *NameGenerator, original map[*TermNode]term.Term) []*Rule {
 	var rules []*Rule
-
-	ruleVarsNonPublic := nonPublicRuleVars(r)
 
 	D.Traverse(data.TraverseDown, data.TraverseBFS, true, func(d *TermNode, w term.Term, _ int) bool {
 		// Leave nodes are already handled by their parent nodes.
@@ -401,22 +366,7 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 
 		f := term.Must(term.AsFunction(d.Value()))
 
-		// The facts in the RHS contain all non-public variables of the rule and the public variable of the function.
-		fVars := ruleVarsNonPublic[:]
-
-		F.IterateSorted(func(k, v term.Term) bool {
-			if v.Equal(w) {
-				for _, vv := range term.Vars(k) {
-					if vv.IsPublic() {
-						fVars = append(fVars, vv)
-					}
-				}
-
-				return false
-			}
-
-			return true
-		})
+		fVars := carriedVars(r, originalTerm(original, d))
 
 		// The RHS contains an instance of the function fact for each parent.
 		rhs := make([]*Fact, d.Parents().Size())
@@ -425,15 +375,11 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 			termName := termNameForNode(names, original, d)
 			if d.Parents().Size() > 1 {
 				g = NewFact(fmt.Sprintf("%s_%s_%s_%d", SubtermName, r.Name, termName, i), []term.Term{
-					// Include all variables of the rule in the fact.
-					// Then, we don't have to add varsFacts for intermediate rules.
 					term.NewFunction(term.PairFunctionName, fVars),
 					term.NewFunction(f.Name, f.Args),
 				}, LinearFact)
 			} else {
 				g = NewFact(fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, termName), []term.Term{
-					// Include all variables of the rule in the fact.
-					// Then, we don't have to add varsFacts for intermediate rules.
 					term.NewFunction(term.PairFunctionName, fVars),
 					term.NewFunction(f.Name, f.Args),
 				}, LinearFact)
@@ -446,20 +392,12 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 		for i, c := range d.Children().AsSlice() {
 			f := term.Must(term.AsFunction(c.Value()))
 
-			fVars := ruleVarsNonPublic[:]
-
-			// If f is not a pre-fact, we add the public variables of f to the fact.
-			// The reason for this is the following:
-			// If f is not a pre-fact, than f as already been computed at this time.
-			// Hence, the value fo the public variable as already been determined.
-			// If however, it is a pre-fact, we first need to compute the value of the public variable
-			// and can therefore not include it in the fact.
+			// A pre-fact is named after its term and precedes the
+			// computation of the term, whose public variables are
+			// therefore not bound yet.
+			fName, fVars := f.Name, carriedVars(r, nil)
 			if !strings.HasSuffix(f.Name, PreFactSuffix) {
-				for _, v := range term.Vars(f) {
-					if v.IsPublic() {
-						fVars = append(fVars, v)
-					}
-				}
+				fName, fVars = termNameForNode(names, original, c), carriedVars(r, originalTerm(original, c))
 			}
 
 			args := []term.Term{
@@ -468,13 +406,6 @@ func GenerateMidRules(r *Rule, D *TermNode, U map[*TermNode]int, F *term.Binding
 
 			if retVar := d.Label(c); retVar != nil {
 				args = append(args, retVar)
-			}
-
-			// Pre-facts are already named based on their term
-			// and can be used directly.
-			fName := f.Name
-			if !strings.HasSuffix(fName, PreFactSuffix) {
-				fName = termNameForNode(names, original, c)
 			}
 
 			factName := fmt.Sprintf("%s_%s_%s", SubtermName, r.Name, fName)
@@ -567,17 +498,29 @@ func termNameForNode(names *NameGenerator, original map[*TermNode]term.Term, nod
 	return names.NameForTerm(t)
 }
 
-func nonPublicRuleVars(r *Rule) []term.Term {
-	var nonPublicRuleVars []*term.Variable
-	ruleVars := utils.Unique(Facts(r.LHS).Vars())
-
-	for _, v := range ruleVars {
-		if !v.IsPublic() {
-			nonPublicRuleVars = append(nonPublicRuleVars, v)
+// carriedVars returns the variables that the ST_ fact of a DAG node carries
+// through the chain of split rules: the non-public premise variables, then
+// the public premise variables, then the public variables of the node's
+// original term t, without duplicates. Every producer and consumer of a
+// fact computes its tuple here, so the chain stays consistent. A public
+// variable of t is carried from the observation of the computation that
+// binds it, including one nested in a subterm. Pass a nil t for a pre-fact:
+// the variables of its term are not bound yet.
+func carriedVars(r *Rule, t term.Term) []term.Term {
+	var nonPublic, public []*term.Variable
+	for _, v := range Facts(r.LHS).Vars() {
+		if v.IsPublic() {
+			public = append(public, v)
+		} else {
+			nonPublic = append(nonPublic, v)
 		}
 	}
-
-	return term.AsTerms(nonPublicRuleVars)
+	for _, v := range term.Vars(t) {
+		if v.IsPublic() {
+			public = append(public, v)
+		}
+	}
+	return term.AsTerms(utils.Unique(append(nonPublic, public...)))
 }
 
 // FIXME: Find a place for this function.

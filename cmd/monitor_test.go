@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,4 +307,58 @@ func readMonitorHookPayload(t *testing.T, path string) violationHookPayload {
 		t.Fatalf("unmarshal hook payload: %v", err)
 	}
 	return payload
+}
+
+// carriedPublicTestEvents are the observations of the setup and of the
+// computations senc, messageis and hmac of the split rule Send, followed
+// by an event that consumes the conclusion of Send.
+var carriedPublicTestEvents = []string{
+	`{"time":0,"event":{"type":"function","name":"pair","args":[{"type":"function","name":"setup","args":[{"type":"constant","value":"0x1111"},{"type":"constant","value":"0x78"}]},{"type":"function","name":"pair","args":[]}]}}`,
+	`{"time":0,"event":{"type":"function","name":"pair","args":[{"type":"function","name":"senc","args":[{"type":"constant","value":"0x6222"},{"type":"constant","value":"0x1111"}]},{"type":"constant","value":"0x3333"}]}}`,
+	`{"time":0,"event":{"type":"function","name":"pair","args":[{"type":"function","name":"messageis","args":[{"type":"constant","value":"0x3333"},{"type":"constant","value":"0x1111"}]},{"type":"constant","value":"0x4444"}]}}`,
+	`{"time":0,"event":{"type":"function","name":"pair","args":[{"type":"function","name":"hmac","args":[{"type":"constant","value":"0x1111"},{"type":"constant","value":"0x4444"}]},{"type":"constant","value":"0x5555"}]}}`,
+	`{"time":0,"event":{"type":"function","name":"pair","args":[{"type":"function","name":"after","args":[{"type":"constant","value":"0x5555"}]},{"type":"function","name":"pair","args":[]}]}}`,
+}
+
+func TestMonitorCarriesPublicVariablesThroughSplitRules(t *testing.T) {
+	const (
+		nested = `rule Setup [trigger=[<setup(k, x), <>>]]: [] --> [Key(k)]
+rule Send:
+  let c = senc(cat(byte('0x62'), byte(%sbody)), k)
+      s = hmac(k, messageis(c, k))
+  in [Key(k)] --[Compute(<s>)]-> [Done(s)]
+rule After [trigger=[<after(x), <>>]]: [Done(x)] --> []`
+		premise = `rule Setup [trigger=[<setup(k, %[1]sp), <>>]]: [] --> [Key(k, %[1]sp)]
+rule Send:
+  let c = senc(m, k)
+      s = hmac(k, messageis(c, k))
+  in [Key(k, %[1]sp)] --[Compute(<s, %[1]sp>)]-> [Done(s)]
+rule After [trigger=[<after(x), <>>]]: [Done(x)] --> []`
+	)
+	for _, test := range []struct {
+		name  string
+		rules string
+	}{
+		{"nested public variable", fmt.Sprintf(nested, "$")},
+		{"nested message variable", fmt.Sprintf(nested, "")},
+		{"public premise variable", fmt.Sprintf(premise, "$")},
+		{"message premise variable", fmt.Sprintf(premise, "")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			specPath := writeMonitorSpec(t, test.rules)
+			// The last event is only accepted after the end rule of Send
+			// has produced Done(s).
+			input := strings.Join(carriedPublicTestEvents, "\n") + "\n"
+			config := MonitorConfig{In: writeMonitorInput(t, []byte(input))}
+			cmd := monitorTestCommand()
+			cmd.Flags().Bool("decompose", true, "")
+			if err := config.RunE(cmd, []string{specPath}); err != nil {
+				t.Fatalf("RunE: %v", err)
+			}
+			output := cmd.OutOrStdout().(*bytes.Buffer).String()
+			if got := strings.Count(output, ": <"); got != len(carriedPublicTestEvents) {
+				t.Fatalf("consumed %d events, want %d:\n%s", got, len(carriedPublicTestEvents), output)
+			}
+		})
+	}
 }

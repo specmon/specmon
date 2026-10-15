@@ -70,6 +70,7 @@ func TestTranslationFromFiles(t *testing.T) {
 
 			// Compare rules
 			assertRulesEqual(t, expectedRules, processed.Executable)
+			assertCarriedTuplesConsistent(t, processed.Executable)
 		})
 	}
 }
@@ -249,5 +250,86 @@ func assertRulesEqual(t *testing.T, expected, actual []*rule.Rule) {
 		// For now, comparing the string representation should be sufficient.
 		require.Equal(t, expectedRule.String(), actualRule.String(),
 			"Rule %s: Content mismatch", expectedRule.Name)
+	}
+}
+
+// carriedTupleTestRules are source rules whose split-rule chains carry
+// public variables: nested below the first of several computations, at
+// increasing depths, under a shared subterm, and in the premise.
+var carriedTupleTestRules = map[string]string{
+	"nested below the first computation": `
+rule Send:
+  let c = senc(cat(byte('0x62'), byte($body)), k)
+      s = hmac(k, messageis(c, k))
+  in [Key(k)] --[Compute(<s>)]-> [Sent(c)]`,
+	"in the premise": `
+rule Send:
+  let c = senc(m, k)
+      s = hmac(k, messageis(c, k))
+  in [Key(k, $p)] --[Compute(<s, $p>)]-> [Done(s)]`,
+	"depth 1": `
+rule R: [St(k)] --> [Out(h(g(k), $x))]`,
+	"depth 2": `
+rule R: [St(k)] --> [Out(h(g(k, $x)))]`,
+	"depth 3": `
+rule R: [St(k)] --> [Out(h(g(f(k, $x))))]`,
+	"shared subterm": `
+rule R: [St(k)] --> [Out(h(g(f(k, $x))), i(g(f(k, $x))))]`,
+	"premise and term": `
+rule R: [St($p, k)] --> [Out(h(g(f(k, $x)), $p))]`,
+	"repeated": `
+rule R: [St($p, k)] --> [Out(h(g(k, $x, $x, $p)), $x)]`,
+}
+
+// assertCarriedTuplesConsistent checks that every ST_ fact is produced and
+// consumed with the same carried tuple, its first argument.
+func assertCarriedTuplesConsistent(t *testing.T, rules []*rule.Rule) int {
+	t.Helper()
+	prefix := rule.SubtermName + rule.ComponentSep
+	tuples := map[string]map[string]bool{}
+	produced, consumed := map[string]bool{}, map[string]bool{}
+	record := func(facts []*rule.Fact, side map[string]bool) {
+		for _, f := range facts {
+			if !strings.HasPrefix(f.Name, prefix) || len(f.Args) == 0 {
+				continue
+			}
+			if tuples[f.Name] == nil {
+				tuples[f.Name] = map[string]bool{}
+			}
+			tuples[f.Name][f.Args[0].String()] = true
+			side[f.Name] = true
+		}
+	}
+	for _, r := range rules {
+		record(r.LHS, consumed)
+		record(r.RHS, produced)
+	}
+	for name, carried := range tuples {
+		if len(carried) != 1 || !produced[name] || !consumed[name] {
+			t.Errorf("%s: carried tuples %v, produced %t, consumed %t", name, carried, produced[name], consumed[name])
+		}
+	}
+	return len(tuples)
+}
+
+func TestTranslateCarriesPublicVariablesConsistently(t *testing.T) {
+	t.Parallel()
+
+	for name, source := range carriedTupleTestRules {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rules.spthy")
+			spec := "theory Carried\nbegin\n" + source + "\nend\n"
+			if err := os.WriteFile(path, []byte(spec), 0o600); err != nil {
+				t.Fatalf("write specification: %v", err)
+			}
+			processed, err := cmd.ProcessRules(context.Background(), path, "", true, nil)
+			if err != nil {
+				t.Fatalf("process rules: %v", err)
+			}
+			if assertCarriedTuplesConsistent(t, processed.Executable) == 0 {
+				t.Fatalf("no split rules generated: %v", processed.Executable)
+			}
+		})
 	}
 }
