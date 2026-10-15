@@ -4,16 +4,16 @@ begin
 rule R_0 [ trigger=[<g($x), g_x>] ]:
   [ In($x) ]
   -->
-  [ ST_R_g_x_0(<$x>, g($x))
-  , ST_R_g_x_1(<$x>, g($x)) ]
+  [ ST_R_g_x(<$x>, g($x), 0)
+  , ST_R_g_x(<$x>, g($x), 1) ]
 
 rule R_1 [ trigger=[<h(g_x), h_g_x>] ]:
-  [ ST_R_g_x_0(<$x>, g_x) ]
+  [ ST_R_g_x(<$x>, g_x, 0) ]
   -->
   [ ST_R_h_g_x(<$x>, h(g_x)) ]
 
 rule R_2 [ trigger=[<f(g_x), f_g_x>] ]:
-  [ ST_R_g_x_1(<$x>, g_x) ]
+  [ ST_R_g_x(<$x>, g_x, 1) ]
   -->
   [ ST_R_f_g_x(<$x>, f(g_x)) ]
 

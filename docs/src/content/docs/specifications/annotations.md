@@ -56,6 +56,8 @@ SpecMon handles this by **decomposing** rules that contain function applications
 
 Two of these boundaries are fused when keeping them apart gains nothing. If the rule has premises and a single innermost computation, there is nothing to look ahead for: the start rule is left out, and the rule of that computation matches the premises of the original rule. A rule without premises keeps its start rule. If the conclusions and actions together have a single outermost computation, its rule and the end rule become one rule, triggered by that computation. A chain such as `Out(f(g(x)))` therefore becomes two rules. With an action that computes something else, such as `--[ Log(h(x)) ]->`, it stays split.
 
+Generated state facts distinguish each use of a shared computation with an occurrence argument. Translation also rejects an exact generated fact name shared by different source-rule names. Rename one of the reported rules to remove the collision. This check does not reserve user-written state names or require unique source-rule names.
+
 ### Example: decomposition and dependencies
 
 Given the rule:

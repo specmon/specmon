@@ -362,3 +362,53 @@ rule After [trigger=[<after(x), <>>]]: [Done(x)] --> []`
 		})
 	}
 }
+
+func TestSplitStateOccurrencesRejectWrongCompletedTrace(t *testing.T) {
+	const model = `rule Seed [trigger=[<seed(x), <>>]]: [] --> [Seed(x)]
+rule R: [Seed(x)] --> [Final(f(g(x)), h(g(x)), g(x,'0'))]
+rule After [trigger=[<after(a,b,c), <>>]]: [Final(a,b,c)] --> []`
+	for _, wrong := range []bool{false, true} {
+		t.Run(fmt.Sprint(wrong), func(t *testing.T) {
+			value := func(s string) term.Term { return term.NewConstant(s) }
+			hInput, finalG := value("A"), value("B")
+			if wrong {
+				hInput, finalG = value("B"), value("A")
+			}
+			var input strings.Builder
+			for _, step := range []struct {
+				name   string
+				result term.Term
+				args   []term.Term
+			}{
+				{"seed", rewriteTestEmpty, []term.Term{value("x")}},
+				{"g", value("A"), []term.Term{value("x")}},
+				{"g", value("B"), []term.Term{value("x"), term.NewConstant(int64(0))}},
+				{"h", value("H"), []term.Term{hInput}},
+				{"f", value("F"), []term.Term{value("A")}},
+				{"after", rewriteTestEmpty, []term.Term{value("F"), value("H"), finalG}},
+			} {
+				event := monitor.TimedEvent{Event: term.NewFunction(term.PairFunctionName, []term.Term{term.NewFunction(step.name, step.args), step.result})}
+				line, err := json.Marshal(event)
+				if err != nil {
+					t.Fatal(err)
+				}
+				input.Write(line)
+				input.WriteByte('\n')
+			}
+			c := MonitorConfig{In: writeMonitorInput(t, []byte(input.String()))}
+			command := monitorTestCommand()
+			command.Flags().Bool("decompose", true, "")
+			err := c.RunE(command, []string{writeMonitorSpec(t, model)})
+			if wrong {
+				if !errors.Is(err, monitor.ErrNoApplicableRule) {
+					t.Fatalf("wrong trace error = %v", err)
+				}
+				if strings.Contains(command.OutOrStdout().(*bytes.Buffer).String(), "4:") {
+					t.Fatal("wrong fourth event was consumed")
+				}
+			} else if err != nil {
+				t.Fatalf("correct trace: %v", err)
+			}
+		})
+	}
+}

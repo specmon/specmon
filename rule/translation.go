@@ -58,11 +58,6 @@ func stFactName(ruleName, termName string) string {
 	return fmt.Sprintf("%s_%s_%s", SubtermName, ruleName, termName)
 }
 
-// stFactNameIndexed builds a disambiguated ST fact name for multi-parent nodes.
-func stFactNameIndexed(ruleName, termName string, index int) string {
-	return fmt.Sprintf("%s_%s_%s_%d", SubtermName, ruleName, termName, index)
-}
-
 // replaceFunctionsWithVars clones the given facts and replaces all function
 // subterms that appear in the binding with their corresponding variables.
 func replaceFunctionsWithVars(facts []*Fact, binding *term.Binding) []*Fact {
@@ -101,7 +96,7 @@ func buildMidRuleLHS(ctx *translationCtx, d *TermNode) []*Fact {
 
 		factName := stFactName(ctx.rule.Name, name)
 		if c.Parents().Size() > 1 {
-			factName = stFactNameIndexed(ctx.rule.Name, name, ctx.parentCount[c])
+			args = append(args, term.NewConstant(int64(ctx.parentCount[c])))
 			ctx.parentCount[c]++
 		}
 
@@ -119,16 +114,14 @@ func buildMidRuleRHS(ctx *translationCtx, d *TermNode) []*Fact {
 
 	rhs := make([]*Fact, d.Parents().Size())
 	for i := range d.Parents().AsSlice() {
-		var factName string
-		if d.Parents().Size() > 1 {
-			factName = stFactNameIndexed(ctx.rule.Name, termName, i)
-		} else {
-			factName = stFactName(ctx.rule.Name, termName)
-		}
-		rhs[i] = NewFact(factName, []term.Term{
+		args := []term.Term{
 			term.NewFunction(term.PairFunctionName, fVars),
 			term.NewFunction(f.Name, f.Args),
-		}, LinearFact)
+		}
+		if d.Parents().Size() > 1 {
+			args = append(args, term.NewConstant(int64(i)))
+		}
+		rhs[i] = NewFact(stFactName(ctx.rule.Name, termName), args, LinearFact)
 	}
 	return rhs
 }
@@ -267,6 +260,40 @@ func ReplaceSubterms(n *TermNode, b *term.Binding) {
 
 		return true
 	})
+}
+
+// Translate decomposes eligible rules in order and rejects generated fact names
+// shared by differently named source rules. Rules with no-decomp, hints or
+// triggers pass through unchanged. Only names absent from their source rule's
+// facts count as generated.
+func (rules Rules) Translate() (Rules, error) {
+	var translatedRules Rules
+	generatedBy := make(map[string]string)
+	for _, r := range rules {
+		if !r.NoDecomp() && !r.HasHints() && !r.HasTriggers() {
+			translated := Translate(r)
+			sourceNames := make(map[string]bool)
+			for _, fact := range slices.Concat(r.LHS, r.Act, r.RHS) {
+				sourceNames[fact.Name] = true
+			}
+			for _, split := range translated {
+				for _, fact := range slices.Concat(split.LHS, split.Act, split.RHS) {
+					if sourceNames[fact.Name] {
+						continue
+					}
+					if owner, found := generatedBy[fact.Name]; found && owner != r.Name {
+						return nil, fmt.Errorf("rules %s and %s both generate the fact %s, so one of them must be renamed", owner, r.Name, fact.Name)
+					}
+					generatedBy[fact.Name] = r.Name
+				}
+			}
+			translatedRules = append(translatedRules, translated...)
+		} else {
+			translatedRules = append(translatedRules, r)
+		}
+	}
+
+	return translatedRules, nil
 }
 
 func Translate(r *Rule) []*Rule {

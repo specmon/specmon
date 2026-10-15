@@ -56,23 +56,18 @@ func ProcessRules(ctx context.Context, specPath, role string, decompose bool, de
 
 	selectedRules := rule.Rules(rules).FilterByRole(role).DropUnusedRHSFacts()
 
-	var decompRules []*rule.Rule
+	executableRules := selectedRules
 	if decompose {
-		for _, r := range selectedRules {
-			if !r.NoDecomp() && !r.HasHints() && !r.HasTriggers() {
-				decompRules = append(decompRules, rule.Translate(r)...)
-			} else {
-				decompRules = append(decompRules, r)
-			}
+		executableRules, err = selectedRules.Translate()
+		if err != nil {
+			return RuleSets{}, err
 		}
-	} else {
-		decompRules = selectedRules
 	}
 
 	return RuleSets{
 		Parsed:     rules,
 		Selected:   selectedRules,
-		Executable: decompRules,
+		Executable: executableRules,
 	}, nil
 }
 

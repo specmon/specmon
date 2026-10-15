@@ -336,3 +336,74 @@ func TestTranslateCarriesPublicVariablesConsistently(t *testing.T) {
 		})
 	}
 }
+
+func TestRulesTranslatePreservesOrderAndExplicitRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.spthy")
+	source := `theory Batch
+begin
+rule First: [St(x)] --> [Out(f(g(x)))]
+rule Manual [no-decomp]: [St(x)] --> [Out(f(g(x)))]
+rule Hint [hint=[<read(x), y>]]: [St(x)] --> [Out(f(g(x)))]
+rule Trigger [trigger=[<read(x), y>]]: [St(x)] --> [Out(f(g(x)))]
+rule Last: [St(x)] --> [Out(f(g(x)))]
+end`
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
+	parsed, err := parser.ParseFile(context.Background(), path, nil)
+	require.NoError(t, err)
+	before := fmt.Sprint(parsed)
+	translated, err := rule.Rules(parsed).Translate()
+	require.NoError(t, err)
+	var names []string
+	for _, r := range translated {
+		names = append(names, r.Name)
+	}
+	require.Equal(t, []string{"First_0", "First_End", "Manual", "Hint", "Trigger", "Last_0", "Last_End"}, names)
+	for i := 1; i <= 3; i++ {
+		require.Same(t, parsed[i], translated[i+1])
+	}
+	require.Equal(t, before, fmt.Sprint(parsed))
+
+	empty, err := rule.Rules(nil).Translate()
+	require.NoError(t, err)
+	require.Nil(t, empty)
+}
+
+func TestRulesTranslateGeneratedStateNameCollisions(t *testing.T) {
+	const source = `rule Seed [trigger=[<seed(x), <>>]]: [] --> [Seed(x)]
+rule Seed2 [trigger=[<seed2(x), <>>]]: [] --> [Seed2(x)]
+rule R: [Seed(y)] --> [Final(f(g(y, '0')))]
+rule R_g: [Seed2(z)] --> [Final2(k(y()))]
+rule After [trigger=[<after(a), <>>]]: [Final(a)] --> []
+rule After2 [trigger=[<after2(a), <>>]]: [Final2(a)] --> []`
+	for _, tc := range []struct {
+		name, model string
+		collision   bool
+	}{
+		{"collision", source, true},
+		{"renamed", strings.ReplaceAll(source, "rule R_g:", "rule Rg:"), false},
+		{"prefix", strings.ReplaceAll(source, "k(y())", "k(h(z))"), false},
+		{"shared", strings.ReplaceAll(source, "f(g(y, '0'))", "f(g(y, '0'), g(y, '0'))"), true},
+		{"shared without collision", strings.ReplaceAll(strings.ReplaceAll(source, "rule R_g:", "rule Rg:"), "f(g(y, '0'))", "f(g(y, '0'), g(y, '0'))"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rules.spthy")
+			require.NoError(t, os.WriteFile(path, []byte("theory Collisions\nbegin\n"+tc.model+"\nend\n"), 0o600))
+			parsed, err := parser.ParseFile(context.Background(), path, nil)
+			require.NoError(t, err)
+			before := fmt.Sprint(parsed)
+			translated, err := rule.Rules(parsed).Translate()
+			require.Equal(t, before, fmt.Sprint(parsed), "Translate mutated source rules")
+			if (err != nil) != tc.collision {
+				t.Fatalf("Rules.Translate = %v, collision = %v", err, tc.collision)
+			}
+			if tc.collision {
+				require.Nil(t, translated)
+				for _, part := range []string{"rules R and R_g", "ST_R_g_y_0", "renamed"} {
+					if !strings.Contains(err.Error(), part) {
+						t.Fatalf("error %q missing %q", err, part)
+					}
+				}
+			}
+		})
+	}
+}

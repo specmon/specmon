@@ -4,16 +4,16 @@ begin
 rule TestRule_0 [ trigger=[<hash(m), h_m>] ]:
   [ State0(m) ]
   -->
-  [ ST_TestRule_h_m_0(<m>, hash(m))
-  , ST_TestRule_h_m_1(<m>, hash(m)) ]
+  [ ST_TestRule_h_m(<m>, hash(m), 0)
+  , ST_TestRule_h_m(<m>, hash(m), 1) ]
 
 rule TestRule_1 [ trigger=[<len(h_m), l_h_m>] ]:
-  [ ST_TestRule_h_m_0(<m>, h_m) ]
+  [ ST_TestRule_h_m(<m>, h_m, 0) ]
   -->
   [ ST_TestRule_l_h_m(<m>, len(h_m)) ]
 
 rule TestRule_End:
-  [ ST_TestRule_h_m_1(<m>, h_m)
+  [ ST_TestRule_h_m(<m>, h_m, 1)
   , ST_TestRule_l_h_m(<m>, l_h_m) ]
   -->
   [ Out(l_h_m)

@@ -135,3 +135,40 @@ func TestMultiplexedReaderReturnsListenerFailures(t *testing.T) {
 		t.Fatalf("Read error = %v, want listener failure", err)
 	}
 }
+
+func TestGeneratedStateNameCollisionCommands(t *testing.T) {
+	const source = `rule Seed [trigger=[<seed(x), <>>]]: [] --> [Seed(x)]
+rule Seed2 [trigger=[<seed2(x), <>>]]: [] --> [Seed2(x)]
+rule R: [Seed(y)] --> [Final(f(g(y, '0')))]
+rule R_g: [Seed2(z)] --> [Final2(k(y()))]
+rule After [trigger=[<after(a), <>>]]: [Final(a)] --> []
+rule After2 [trigger=[<after2(a), <>>]]: [Final2(a)] --> []`
+	path := writeMonitorSpec(t, source)
+	if _, err := ProcessRules(context.Background(), path, "", false, nil); err != nil {
+		t.Fatalf("without decomposition: %v", err)
+	}
+	for _, run := range []func() error{
+		func() error {
+			c := DefaultRootConfig()
+			c.SpecPath = path
+			c.Quiet = true
+			return c.RunE(context.Background())
+		},
+		func() error {
+			c := MonitorConfig{In: writeMonitorInput(t, nil)}
+			command := monitorTestCommand()
+			command.Flags().Bool("decompose", true, "")
+			return c.RunE(command, []string{path})
+		},
+		func() error {
+			c := RewriteConfig{In: writeMonitorInput(t, nil)}
+			command := monitorTestCommand()
+			command.Flags().Bool("decompose", true, "")
+			return c.RunE(command, []string{path})
+		},
+	} {
+		if err := run(); err == nil || !strings.Contains(err.Error(), "both generate the fact") {
+			t.Fatalf("command error = %v", err)
+		}
+	}
+}
