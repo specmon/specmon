@@ -1611,3 +1611,52 @@ func silenceBenchmarkLogs(b *testing.B) {
 	log.SetLevel(log.WarnLevel)
 	b.Cleanup(func() { log.SetLevel(level) })
 }
+
+// TestMonitorPremiseWithRepeatedVariable applies a rule whose premise
+// repeats a variable across two arguments and whose trigger does not bind
+// it. A stored fact with different values in these arguments does not
+// match, for a persistent and for a linear premise. One with equal values
+// does.
+func TestMonitorPremiseWithRepeatedVariable(t *testing.T) {
+	t.Parallel()
+
+	x, y, v, w := term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("v"), term.NewVariable("w")
+	c0, c1, check := term.NewConstant("c0"), term.NewConstant("c1"), term.NewConstant("check")
+	done := func(args ...term.Term) *rule.Fact { return rule.NewFact("RepeatedDone", args, rule.LinearFact) }
+	learn := func(l, r term.Term) term.Term {
+		return eventTerm("RepeatedLearn", term.NewFunction(term.PairFunctionName, []term.Term{l, r}))
+	}
+
+	for _, kind := range []rule.FactType{rule.PersistentFact, rule.LinearFact} {
+		fact := func(args ...term.Term) *rule.Fact { return rule.NewFact("RepeatedFact", args, kind) }
+		rules := []*rule.Rule{
+			triggerRule("RepeatedRuleName"+"Learn", nil, []*rule.Fact{fact(x, y)}, nil,
+				eventTerm("RepeatedLearn", term.NewFunction(term.PairFunctionName, []term.Term{x, y}))),
+			triggerRule("RepeatedRuleName"+"Check", []*rule.Fact{fact(v, v)}, []*rule.Fact{done(v)}, nil,
+				eventTerm("RepeatedUse", w)),
+		}
+		m, err := NewMonitor(rules)
+		if err != nil {
+			t.Fatalf("%s: NewMonitor: %v", kind, err)
+		}
+		if _, err := m.ProcessEvent(learn(c1, c0)); err != nil {
+			t.Fatalf("%s: learn: %v", kind, err)
+		}
+		if _, err := m.ProcessEvent(eventTerm("RepeatedUse", check)); !errors.Is(err, ErrNoApplicableRule) {
+			t.Fatalf("%s: a premise %s matched %s: %v", kind, fact(v, v), fact(c1, c0), err)
+		}
+
+		m, err = NewMonitor(rules)
+		if err != nil {
+			t.Fatalf("%s: NewMonitor: %v", kind, err)
+		}
+		for _, event := range []term.Term{learn(c0, c0), eventTerm("RepeatedUse", check)} {
+			if _, err := m.ProcessEvent(event); err != nil {
+				t.Fatalf("%s: event %s: %v", kind, event, err)
+			}
+		}
+		if got := m.configs.Values()[0].CountByName("RepeatedDone"); got != 1 {
+			t.Fatalf("%s: %d results after a matching premise, want 1", kind, got)
+		}
+	}
+}

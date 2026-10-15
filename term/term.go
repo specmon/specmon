@@ -839,11 +839,12 @@ func Vars(t Term) []*Variable {
 
 // occurs reports whether v appears in t. Used by the unification
 // occurs-check; short-circuits without allocating, unlike
-// slices.Contains(Vars(t), v).
+// slices.Contains(Vars(t), v). Variables are identified by name, as in
+// bindings and substitution.
 func occurs(v *Variable, t Term) bool {
 	switch n := t.(type) {
 	case *Variable:
-		return v == n
+		return v.Name == n.Name
 	case *Function:
 		for _, arg := range n.Args {
 			if occurs(v, arg) {
@@ -994,20 +995,37 @@ func (f *Function) Subst(b *Binding) Term {
 
 func Unify(t1, t2 Term) (*Binding, error) {
 	b := NewBinding()
+	err := evaluateAndUnify(t1, t2, b)
+	return b, err
+}
 
+// UnifyAll unifies the terms of ts1 with those of ts2 pairwise into one
+// binding, so that a variable that occurs in several of them is bound
+// consistently. Unequal lengths return ErrNameOrArgMismatch.
+func UnifyAll(ts1, ts2 []Term) (*Binding, error) {
+	if len(ts1) != len(ts2) {
+		return nil, ErrNameOrArgMismatch
+	}
+	b := NewBinding()
+	for i := range ts1 {
+		if err := evaluateAndUnify(ts1[i], ts2[i], b); err != nil {
+			return nil, err
+		}
+	}
+	return b, nil
+}
+
+// evaluateAndUnify evaluates t1 and t2 and unifies the results into b.
+func evaluateAndUnify(t1, t2 Term, b *Binding) error {
 	a1, err := Evaluate(t1)
 	if err != nil {
-		return nil, fmt.Errorf("%w for %s: %w", ErrEvaluation, t1, err)
+		return fmt.Errorf("%w for %s: %w", ErrEvaluation, t1, err)
 	}
-
 	a2, err := Evaluate(t2)
 	if err != nil {
-		return nil, fmt.Errorf("%w for %s: %w", ErrEvaluation, t2, err)
+		return fmt.Errorf("%w for %s: %w", ErrEvaluation, t2, err)
 	}
-
-	err = unify(a1, a2, b)
-
-	return b, err
+	return unify(a1, a2, b)
 }
 
 type UnificationError struct {
@@ -1109,26 +1127,58 @@ func unify(a1, a2 Term, b *Binding) error {
 			return ErrInvalidFormat
 		}
 
+		// A field variable that is already bound must match the parsed
+		// value.
+		var conflict error
 		formatBinding.Iterate(func(k, v Term) bool {
+			if prev, ok := b.Get(k); ok && !prev.Equal(k) {
+				conflict = unify(prev, v, b)
+				return conflict == nil
+			}
 			b.Set(k, v)
 
 			return true
 		})
 
-		return nil
+		return conflict
 	case t1Type == ConstantType && (t2Type == FunctionType || t2Type == VariableType):
 		// Swap the order of the terms and try again.
 		return unify(a2, a1, b)
 	case t1Type == VariableType:
 		v := Must(AsVariable(a1))
 
-		if occurs(v, a2) {
-			// return &UnificationError{a1, a2, "occurs check failed"}
-			return ErrOccursCheckFailed
+		// A variable that is already bound is unified with its value.
+		// Rebinding it would drop the constraint of its earlier occurrence.
+		// A variable bound to itself counts as unbound.
+		if prev, ok := b.Get(v); ok && !prev.Equal(v) {
+			return unify(prev, a2, b)
+		}
+		// Bind v to the value of a bound variable, not to the variable,
+		// so that no chain or cycle of variables forms.
+		if w, ok := a2.(*Variable); ok {
+			if value, ok := b.Get(w); ok && !value.Equal(w) {
+				return unify(v, value, b)
+			}
 		}
 
+		// A ground value cannot contain v. Otherwise the bindings so far
+		// are applied first, so that the occurs check also sees v through
+		// a variable that is already bound.
+		if !IsGround(a2) {
+			a2 = SubstBinding(b, a2)
+			if occurs(v, a2) {
+				// return &UnificationError{a1, a2, "occurs check failed"}
+				return ErrOccursCheckFailed
+			}
+		}
+
+		// Substitute a2 for v in the values bound so far. A ground value
+		// cannot contain v. Skipping it avoids copying every bound
+		// function term for each new variable.
 		b.Iterate(func(x, t Term) bool {
-			b.Set(x, Subst(*v, a2, t))
+			if !IsGround(t) {
+				b.Set(x, Subst(*v, a2, t))
+			}
 
 			return true
 		})

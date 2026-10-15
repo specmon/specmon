@@ -160,34 +160,14 @@ func (f *Fact) Unify(other *Fact) (*term.Binding, error) {
 		return nil, ErrFactUnify
 	}
 
-	// Optimization: collect all non-empty partial bindings to avoid repeated Extend() operations
-	// Skip empty bindings since they don't contribute anything
-	var partials []*term.Binding
-
-	for i, a := range f.Args {
-		b1, err := a.Unify(other.Args[i])
-		if err != nil {
-			if errors.Is(err, term.ErrEvaluation) {
-				return nil, fmt.Errorf("%w: %w", ErrFactUnify, err)
-			}
-			// return nil, fmt.Errorf("cannot unify %s and %s: %w", f, other, err)
-			return nil, ErrFactUnify
+	// Unify all arguments into one binding, so that a variable occurring in
+	// several arguments is bound consistently.
+	b, err := term.UnifyAll(f.Args, other.Args)
+	if err != nil {
+		if errors.Is(err, term.ErrEvaluation) {
+			return nil, fmt.Errorf("%w: %w", ErrFactUnify, err)
 		}
-		// Only collect non-empty bindings
-		if b1.Size() > 0 {
-			partials = append(partials, b1)
-		}
-	}
-
-	// Fast path: if no bindings were created, return empty binding
-	if len(partials) == 0 {
-		return term.NewBinding(), nil
-	}
-
-	// Now merge all bindings at once
-	b := term.NewBinding()
-	for _, partial := range partials {
-		b = b.Extend(partial)
+		return nil, ErrFactUnify
 	}
 
 	return b, nil

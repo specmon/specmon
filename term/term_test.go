@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"strconv"
 	"testing"
 
 	"github.com/specmon/specmon/term"
@@ -136,12 +137,11 @@ func TestUnify(t *testing.T) {
 			false,
 		},
 		{
-			// unify(f(x, y), f"y, x)) | [ x -> x, y -> x ]
+			// unify(f(x, y), f(y, x)) | [ x -> y ]
 			term.NewFunction("f", []term.Term{term.NewVariable("x"), term.NewVariable("y")}),
 			term.NewFunction("f", []term.Term{term.NewVariable("y"), term.NewVariable("x")}),
 			term.BindingFromMap(map[term.Term]term.Term{
-				term.NewVariable("x"): term.NewVariable("x"),
-				term.NewVariable("y"): term.NewVariable("x"),
+				term.NewVariable("x"): term.NewVariable("y"),
 			}),
 			false,
 		},
@@ -917,5 +917,133 @@ func TestEvaluateCatKeepsUnevaluableCallsSymbolic(t *testing.T) {
 		if got, err := term.Evaluate(malformed); !errors.Is(err, term.ErrInvalidFormatFunction) {
 			t.Errorf("Evaluate(%s) = %v, %v; want %v", malformed, got, err, term.ErrInvalidFormatFunction)
 		}
+	}
+}
+
+// TestUnifyBindsRepeatedVariablesConsistently checks that a variable that
+// occurs several times in a pattern must take the same value at each
+// occurrence: across arguments, nested, as a format field, and when
+// variables of both sides are bound to each other. A variable that would
+// occur in its own value through another variable has no unifier.
+func TestUnifyBindsRepeatedVariablesConsistently(t *testing.T) {
+	t.Parallel()
+
+	x, y, z := term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("z")
+	a, b := term.NewConstant("a"), term.NewConstant("b")
+	pair := func(l, r term.Term) term.Term { return term.NewFunction(term.PairFunctionName, []term.Term{l, r}) }
+	fn := func(name string, args ...term.Term) term.Term { return term.NewFunction(name, args) }
+	field := func(v term.Term) term.Term {
+		return fn(term.CatFunctionName, fn("byte", v))
+	}
+	five, six := term.NewConstant([]byte{0x05}), term.NewConstant([]byte{0x06})
+
+	for _, tc := range []struct {
+		name            string
+		pattern, target term.Term
+		want            map[term.Term]term.Term // nil: no unifier
+	}{
+		{"across arguments, equal", pair(x, x), pair(a, a), map[term.Term]term.Term{x: a}},
+		{"across arguments, different", pair(x, x), pair(a, b), nil},
+		{"nested, equal", fn("f", x, fn("g", x)), fn("f", a, fn("g", a)), map[term.Term]term.Term{x: a}},
+		{"nested, different", fn("f", x, fn("g", x)), fn("f", a, fn("g", b)), nil},
+		{"format field, equal", pair(x, field(x)), pair(five, five), map[term.Term]term.Term{x: five}},
+		{"format field, different", pair(x, field(x)), pair(six, five), nil},
+		{"pattern against pattern", pair(x, x), pair(y, a), map[term.Term]term.Term{x: a, y: a}},
+		{"variables bound to each other", fn("t", x, y, x), fn("t", y, x, a), map[term.Term]term.Term{x: a, y: a}},
+		{"chain of variables", fn("t", x, z, y, x), fn("t", y, x, z, a), map[term.Term]term.Term{x: a, y: a, z: a}},
+		{"cycle through a bound variable", pair(x, y), pair(y, fn("f", x)), nil},
+		{"cycle through another instance of a variable", x, fn("f", term.NewVariable("x")), nil},
+	} {
+		got, err := term.Unify(tc.pattern, tc.target)
+		if tc.want == nil {
+			if err == nil {
+				t.Errorf("%s: Unify(%s, %s) = %s, want no unifier", tc.name, tc.pattern, tc.target, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: Unify(%s, %s): %v", tc.name, tc.pattern, tc.target, err)
+			continue
+		}
+		for v, want := range tc.want {
+			if value, ok := got.Get(v); !ok || !value.Equal(want) {
+				t.Errorf("%s: Unify(%s, %s) = %s, want %s bound to %s", tc.name, tc.pattern, tc.target, got, v, want)
+			}
+		}
+	}
+}
+
+// TestUnifyAllBindsAcrossTerms checks that UnifyAll uses one binding for
+// all pairs of terms.
+func TestUnifyAllBindsAcrossTerms(t *testing.T) {
+	t.Parallel()
+
+	x := term.NewVariable("x")
+	a, b := term.NewConstant("a"), term.NewConstant("b")
+	if _, err := term.UnifyAll([]term.Term{x, x}, []term.Term{a, b}); err == nil {
+		t.Fatal("UnifyAll bound x to two different values")
+	}
+	got, err := term.UnifyAll([]term.Term{x, x}, []term.Term{a, a})
+	if err != nil {
+		t.Fatalf("UnifyAll: %v", err)
+	}
+	if value, ok := got.Get(x); !ok || !value.Equal(a) {
+		t.Fatalf("UnifyAll = %s, want x bound to %s", got, a)
+	}
+}
+
+// TestUnifyAllDoesNotCopyGroundValues checks that binding variables to
+// function terms allocates no more than binding them to constants: the
+// values bound so far are ground, so a new binding must not copy them.
+// It does not run in parallel, since AllocsPerRun counts allocations of
+// the whole process.
+func TestUnifyAllDoesNotCopyGroundValues(t *testing.T) {
+	const n = 16
+	vars := make([]term.Term, n)
+	constants := make([]term.Term, n)
+	pairs := make([]term.Term, n)
+	for i := range n {
+		vars[i] = term.NewVariable("x" + strconv.Itoa(i))
+		c := term.NewConstant("c" + strconv.Itoa(i))
+		constants[i] = c
+		pairs[i] = term.NewFunction(term.PairFunctionName, []term.Term{c, c})
+	}
+	allocs := func(values []term.Term) float64 {
+		return testing.AllocsPerRun(20, func() {
+			if _, err := term.UnifyAll(vars, values); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if got, want := allocs(pairs), allocs(constants); got > want {
+		t.Fatalf("UnifyAll with %d pairs: %v allocations, with %d constants: %v", n, got, n, want)
+	}
+}
+
+func TestUnifyAllLengthMismatch(t *testing.T) {
+	x, a, b := term.NewVariable("x"), term.NewConstant("a"), term.NewConstant("b")
+	for _, tc := range []struct {
+		name        string
+		left, right []term.Term
+	}{
+		{"right_empty", []term.Term{x}, nil},
+		{"left_empty", nil, []term.Term{a}},
+		{"right_longer", []term.Term{x}, []term.Term{a, b}},
+		{"left_longer", []term.Term{x, x}, []term.Term{a}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("panic instead of length error: %v", p)
+				}
+			}()
+			got, err := term.UnifyAll(tc.left, tc.right)
+			if got != nil || !errors.Is(err, term.ErrNameOrArgMismatch) {
+				t.Errorf("UnifyAll = %v, %v; want nil, ErrNameOrArgMismatch", got, err)
+			}
+		})
+	}
+	if b, err := term.UnifyAll(nil, nil); err != nil || b == nil || b.Size() != 0 {
+		t.Fatalf("equal empty slices = %v,%v", b, err)
 	}
 }
