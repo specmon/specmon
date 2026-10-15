@@ -27,6 +27,35 @@ import (
 	"github.com/specmon/specmon/term"
 )
 
+func TestEqualWithKind(t *testing.T) {
+	integer := term.NewConstant(int64(97))
+	integerBytes := term.NewConstant([]byte{97, 0, 0, 0, 0, 0, 0, 0})
+	text := term.NewConstant("a")
+	bytes := term.NewConstant([]byte("a"))
+	nested := func(value term.Term) term.Term { return term.NewFunction("nested", []term.Term{value}) }
+	for _, test := range []struct {
+		name        string
+		left, right term.Term
+		equal       bool
+	}{
+		{"same integer", integer, term.NewConstant(int64(97)), true},
+		{"integer and bytes", integer, integerBytes, false},
+		{"string and bytes", text, bytes, false},
+		{"same string", text, term.NewConstant("a"), true},
+		{"same bytes", bytes, term.NewConstant([]byte("a")), true},
+		{"nested integer and bytes", nested(integer), nested(integerBytes), false},
+		{"nested string and bytes", nested(text), nested(bytes), false},
+		{"nested same bytes", nested(bytes), nested(term.NewConstant([]byte("a"))), true},
+		{"nil and empty bytes", term.NewConstant[[]byte](nil), term.NewConstant([]byte{}), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := term.EqualWithKind(test.left, test.right); got != test.equal {
+				t.Fatalf("EqualWithKind(%s,%s)=%v; want %v", test.left, test.right, got, test.equal)
+			}
+		})
+	}
+}
+
 func TestCompatible(t *testing.T) {
 	t.Parallel()
 

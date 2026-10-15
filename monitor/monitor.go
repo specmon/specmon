@@ -315,7 +315,8 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 }
 
 // processConfigEvent returns every transition that consumes event from c.
-// It does not mutate m.configs.
+// It does not mutate m.configs, which keeps a rewrite configuration paired
+// with only the downstream configurations reached through that rewrite path.
 func (m *Monitor) processConfigEvent(c *Config, event term.Term, key ruleKey) ([]RuleApplication, error) {
 	appliedTriggers, err := m.handleTriggerPaths(c, event, key)
 	if err != nil {

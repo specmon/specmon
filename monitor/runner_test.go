@@ -568,7 +568,110 @@ func TestRunPipelineSettlesAfterDownstreamViolation(t *testing.T) {
 	if err != nil || violation == nil || !errors.Is(violation.Err, monitor.ErrNoApplicableRule) {
 		t.Fatalf("RunPipeline = (%v, %v), want main violation", violation, err)
 	}
+	if violation.EventIndex != 1 || violation.Stats.Received != 1 || violation.Stats.Processed != 0 {
+		t.Fatalf("downstream violation lost event position or stats: %+v", violation)
+	}
+	if rewriter.Stats().Summary(rewriter.Stats().EndTime).Processed != 1 {
+		t.Fatalf("rewriter did not count the successfully rewritten event: %s", rewriter.Stats())
+	}
 	if reader.closes.Load() != 1 {
 		t.Fatalf("input closed %d times, want once", reader.closes.Load())
+	}
+}
+
+func TestRunPipelineReportsViolationBeforeLaterParseError(t *testing.T) {
+	t.Parallel()
+
+	value := term.NewVariable(runnerValueName)
+	for _, accepted := range []int{0, 10, 200, 2000} {
+		rewriter, err := monitor.NewMonitor([]*rule.Rule{{
+			Name: runnerRuleName,
+			Act: []*rule.Fact{
+				rule.NewFact(monitor.RewriteEventName, []term.Term{runnerEvent(runnerOutputEventName, value)}, rule.LinearFact),
+			},
+			Attrs: map[string]rule.Attribute{
+				rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{runnerEvent(runnerInputEventName, value)}},
+			},
+		}})
+		if err != nil {
+			t.Fatalf("NewMonitor rewriter: %v", err)
+		}
+		main, err := monitor.NewMonitor([]*rule.Rule{{
+			Name: runnerRuleName,
+			Attrs: map[string]rule.Attribute{
+				rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
+					runnerEvent(runnerOutputEventName, term.NewConstant[int64](0)),
+				}},
+			},
+		}})
+		if err != nil {
+			t.Fatalf("NewMonitor main: %v", err)
+		}
+		var input strings.Builder
+		for range accepted {
+			input.Write(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant[int64](0))))
+		}
+		input.Write(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant[int64](1))))
+		input.WriteString("{\"time\": 1, \"event\": \n")
+		violation, err := monitor.RunPipeline(context.Background(), rewriter, main, io.NopCloser(strings.NewReader(input.String())), nil)
+		if violation == nil || err != nil || violation.EventIndex != accepted+1 {
+			t.Fatalf("%d accepted events: RunPipeline = (%+v, %v), want the violation at event %d", accepted, violation, err, accepted+1)
+		}
+		// The rejected event was received when its raw event was.
+		mainReceived, rewriteReceived := main.Stats().LatenciesReceived, rewriter.Stats().LatenciesReceived
+		if mainReceived[len(mainReceived)-1] != rewriteReceived[len(rewriteReceived)-1] {
+			t.Fatalf("received latency of the rejected event = %s, of its raw event %s",
+				mainReceived[len(mainReceived)-1], rewriteReceived[len(rewriteReceived)-1])
+		}
+	}
+}
+
+func TestIdleCallbackErrorClosesOpenInput(t *testing.T) {
+	for _, pipeline := range []bool{false, true} {
+		name := "monitor"
+		if pipeline {
+			name = "pipeline"
+		}
+		t.Run(name, func(t *testing.T) {
+			wantErr := errors.New("publish pending output failed")
+			reader := newBlockingReader(runnerEventLine(t, runnerEvent(runnerInputEventName, term.NewConstant[int64](1))))
+			consumed := false
+			onConsumed := func(term.Term) error {
+				consumed = true
+				return nil
+			}
+			onIdle := func() error {
+				if consumed {
+					return wantErr
+				}
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			var violation *monitor.ViolationInfo
+			var err error
+			if pipeline {
+				main, loadErr := monitor.NewMonitor([]*rule.Rule{{
+					Name: runnerRuleName,
+					Attrs: map[string]rule.Attribute{
+						rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
+							runnerEvent(runnerOutputEventName, term.NewVariable(runnerValueName)),
+						}},
+					},
+				}})
+				if loadErr != nil {
+					t.Fatal(loadErr)
+				}
+				violation, err = monitor.RunPipeline(ctx, rewritingRunnerMonitor(t), main, reader, onConsumed, onIdle)
+			} else {
+				violation, err = acceptingRunnerMonitor(t).Run(ctx, reader, onConsumed, onIdle)
+			}
+			if violation != nil || !errors.Is(err, wantErr) || !consumed {
+				t.Fatalf("run = (%v, %v), consumed = %v; want idle error after one event", violation, err, consumed)
+			}
+			if got := reader.closes.Load(); got != 1 {
+				t.Fatalf("input closed %d times, want once", got)
+			}
+		})
 	}
 }

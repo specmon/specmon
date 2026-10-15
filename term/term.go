@@ -256,6 +256,28 @@ func (f *Function) Equal(a Term) bool {
 	return true
 }
 
+// EqualWithKind compares terms recursively without coercing constant kinds.
+// Constants must have the same kind and equal values. Nil and empty byte
+// slices compare equal, as they do with Term.Equal.
+func EqualWithKind(left, right Term) bool {
+	switch l := left.(type) {
+	case *Function:
+		r, ok := right.(*Function)
+		return ok && l.Type == r.Type && l.Name == r.Name && slices.EqualFunc(l.Args, r.Args, EqualWithKind)
+	case *Constant[int64]:
+		_, ok := right.(*Constant[int64])
+		return ok && l.Equal(right)
+	case *Constant[string]:
+		_, ok := right.(*Constant[string])
+		return ok && l.Equal(right)
+	case *Constant[[]byte]:
+		_, ok := right.(*Constant[[]byte])
+		return ok && l.Equal(right)
+	default:
+		return left.Equal(right)
+	}
+}
+
 func (c *Constant[T]) String() string {
 	switch t := any(&c.Value).(type) {
 	case *int64:

@@ -19,6 +19,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -88,10 +89,19 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
 
+	// Batch queued events, but publish them before the runner waits for input.
+	out := bufio.NewWriter(cmd.OutOrStdout())
+	flush := func() error {
+		if err := out.Flush(); err != nil {
+			return fmt.Errorf("write consumed event: %w", err)
+		}
+		return nil
+	}
+
 	count := 1
 	onConsumed := func(event term.Term) error {
 		if !quiet {
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "  %4d: %.120s\n", count, event); err != nil {
+			if _, err := fmt.Fprintf(out, "  %4d: %.120s\n", count, event); err != nil {
 				return fmt.Errorf("write consumed event: %w", err)
 			}
 		}
@@ -118,7 +128,8 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("cannot open pre-trace file: %w", err)
 		}
-		violation, runErr := m.Run(runCtx, preTrace, onConsumed)
+		violation, runErr := m.Run(runCtx, preTrace, onConsumed, flush)
+		flushErr := flush()
 		if violation != nil {
 			fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON())
 			r.handleViolation(cmd, violation, specPath, role, terminateProcess)
@@ -128,21 +139,25 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 			if errors.Is(runErr, context.Canceled) && cmd.Context().Err() == nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), "signal received, exiting")
 				fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON())
-				return nil
+				return flushErr
 			}
 			return fmt.Errorf("process pre-trace: %w", runErr)
+		}
+		if flushErr != nil {
+			return flushErr
 		}
 	}
 
 	var violation *monitor.ViolationInfo
 	var runErr error
 	if rewriter == nil {
-		violation, runErr = m.Run(runCtx, eventSource, onConsumed)
+		violation, runErr = m.Run(runCtx, eventSource, onConsumed, flush)
 	} else {
-		violation, runErr = monitor.RunPipeline(runCtx, rewriter, m, eventSource, onConsumed)
+		violation, runErr = monitor.RunPipeline(runCtx, rewriter, m, eventSource, onConsumed, flush)
 	}
 
-	if _, err := fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON()); err != nil && violation == nil && runErr == nil {
+	flushErr := flush()
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), m.Stats().JSON()); err != nil && violation == nil && runErr == nil && flushErr == nil {
 		return fmt.Errorf("write monitor statistics: %w", err)
 	}
 	if violation != nil {
@@ -152,12 +167,12 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) && cmd.Context().Err() == nil {
 			fmt.Fprintln(cmd.ErrOrStderr(), "signal received, exiting")
-			return nil
+			return flushErr
 		}
 		return fmt.Errorf("monitor events: %w", runErr)
 	}
 
-	return nil
+	return flushErr
 }
 
 func (r *MonitorConfig) handleViolation(

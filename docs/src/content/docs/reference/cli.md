@@ -401,6 +401,9 @@ recursively for every constant.
 
 **Monitor output**:
 - Prints consumed events (unless `--quiet`) and a JSON stats summary to stdout
+- Batches consumed-event output while events are queued, and flushes before
+  waiting for more input and before statistics, violation hooks, or signal
+  messages. A lone event is therefore visible while the input remains open.
 - `--out` is reserved and currently ignored
 
 **Rewrite output (`--out file.log`)**:
