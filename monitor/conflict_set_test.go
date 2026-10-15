@@ -20,6 +20,8 @@ package monitor
 
 import (
 	"math"
+	"math/rand/v2"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -123,5 +125,172 @@ func TestBindingTrailOverwriteRestore(t *testing.T) {
 	}
 	if _, ok := b.Get(y); ok {
 		t.Fatalf("Unwind did not remove y")
+	}
+}
+
+const (
+	prefilterTestFactA    = "PrefilterA"
+	prefilterTestFactB    = "PrefilterB"
+	prefilterTestFunction = "prefilterF"
+)
+
+// prefilterTestConstants mixes constant kinds, including an int64 and a byte
+// string of the same width, so that equal-looking values of different kinds
+// meet in one bucket.
+var prefilterTestConstants = []term.Term{
+	term.NewConstant[int64](1),
+	term.NewConstant[int64](2),
+	term.NewConstant("a"),
+	term.NewConstant("b"),
+	term.NewConstant([]byte{0x01}),
+	term.NewConstant([]byte{0x02}),
+	term.NewConstant([]byte{0, 0, 0, 0, 0, 0, 0, 1}),
+	term.NewConstant([]byte{0x01, 0x02, 0x03}),
+}
+
+func randomPrefilterFactArg(r *rand.Rand) term.Term {
+	constant := prefilterTestConstants[r.IntN(len(prefilterTestConstants))]
+	if r.IntN(6) == 0 {
+		return term.NewFunction(prefilterTestFunction, []term.Term{constant})
+	}
+	return constant
+}
+
+func randomPrefilterPatternArg(r *rand.Rand) term.Term {
+	variables := []*term.Variable{term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("z")}
+	switch r.IntN(10) {
+	case 0, 1, 2, 3:
+		return prefilterTestConstants[r.IntN(len(prefilterTestConstants))]
+	case 4:
+		return term.NewFunction(prefilterTestFunction, []term.Term{variables[r.IntN(len(variables))]})
+	case 5:
+		return term.NewFunction(term.CatFunctionName, []term.Term{
+			term.NewFunction(string(term.FormatByteType), []term.Term{variables[0], term.NewConstant[int64](2)}),
+			term.NewFunction(string(term.FormatByteType), []term.Term{variables[1]}),
+		})
+	default:
+		return variables[r.IntN(len(variables))]
+	}
+}
+
+func randomPrefilterFactType(r *rand.Rand) rule.FactType {
+	if r.IntN(2) == 0 {
+		return rule.PersistentFact
+	}
+	return rule.LinearFact
+}
+
+func randomPrefilterBucket(r *rand.Rand, name string, size int) []*rule.Fact {
+	facts := make([]*rule.Fact, 0, size)
+	for len(facts) < size {
+		if len(facts) > 0 && r.IntN(5) == 0 {
+			// A duplicate, either the same fact or an equal copy.
+			previous := facts[r.IntN(len(facts))]
+			if r.IntN(2) == 0 {
+				facts = append(facts, previous)
+			} else {
+				facts = append(facts, rule.NewFact(previous.Name, previous.Args, previous.Type))
+			}
+			continue
+		}
+		args := make([]term.Term, 1+r.IntN(3))
+		for i := range args {
+			args[i] = randomPrefilterFactArg(r)
+		}
+		facts = append(facts, rule.NewFact(name, args, randomPrefilterFactType(r)))
+	}
+	return facts
+}
+
+// TestConflictSetFactsForConfigPrefilterKeepsBindings compares the conflict
+// set of a configuration with the conflict set of the unfiltered buckets.
+// The bindings and their order must be identical.
+func TestConflictSetFactsForConfigPrefilterKeepsBindings(t *testing.T) {
+	t.Parallel()
+
+	sizes := []int{0, 1, 5, constCandidateMinBucket - 1, constCandidateMinBucket, constCandidateMinBucket + 1, 64, 200}
+	r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // A fixed seed keeps the comparison reproducible.
+	matched, filtered := 0, 0
+	for iteration := range 3000 {
+		c := NewConfig()
+		for _, f := range randomPrefilterBucket(r, prefilterTestFactA, sizes[iteration%len(sizes)]) {
+			c.AddFact(f)
+		}
+		for _, f := range randomPrefilterBucket(r, prefilterTestFactB, sizes[r.IntN(len(sizes))]) {
+			c.AddFact(f)
+		}
+
+		body := make([]*rule.Fact, 1+r.IntN(3))
+		for i := range body {
+			name := prefilterTestFactA
+			if r.IntN(3) == 0 {
+				name = prefilterTestFactB
+			}
+			args := make([]term.Term, 1+r.IntN(3))
+			for j := range args {
+				args[j] = randomPrefilterPatternArg(r)
+			}
+			body[i] = rule.NewFact(name, args, randomPrefilterFactType(r))
+		}
+
+		// The unfiltered item list, in the order conflictSetFactsForConfig
+		// visits the buckets.
+		var items []*rule.Fact
+		visited := map[string]bool{}
+		for _, p := range body {
+			if !visited[p.Name] {
+				visited[p.Name] = true
+				bucket := c.factsByName[p.Name]
+				items = append(items, bucket...)
+				if kept := appendConstCandidates(nil, bucket, body, p.Name); len(kept) < len(bucket) {
+					filtered++
+				}
+			}
+		}
+
+		want := conflictSetFacts(items, body).Values()
+		if got := conflictSetFactsForConfig(c, body).Values(); !slices.EqualFunc(got, want, (*term.Binding).Equal) {
+			t.Fatalf("iteration %d, body %v: bindings %v, want %v", iteration, body, got, want)
+		}
+		if len(want) > 0 {
+			matched++
+		}
+	}
+	// Guard against a vacuous comparison.
+	if matched < 100 || filtered < 100 {
+		t.Fatalf("only %d iterations matched and %d filtered a bucket", matched, filtered)
+	}
+}
+
+// BenchmarkConflictSetFactsForConfigLargePersistentBucket matches a rule
+// whose persistent premise has a bound constant against a bucket of 3,000
+// persistent facts.
+func BenchmarkConflictSetFactsForConfigLargePersistentBucket(b *testing.B) {
+	const (
+		stateFact   = "PrefilterState"
+		allowedFact = "PrefilterAllowedTo"
+		senders     = 100
+		recipients  = 30
+	)
+	c := NewConfig()
+	for s := range senders {
+		for r := range recipients {
+			c.AddFact(rule.NewFact(allowedFact, []term.Term{
+				term.NewConstant("sender" + strconv.Itoa(s)),
+				term.NewConstant("recipient" + strconv.Itoa(r)),
+			}, rule.PersistentFact))
+		}
+	}
+	c.AddFact(rule.NewFact(stateFact, []term.Term{term.NewConstant("sender7"), term.NewConstant[int64](1)}, rule.LinearFact))
+	body := []*rule.Fact{
+		rule.NewFact(stateFact, []term.Term{term.NewConstant("sender7"), term.NewVariable("n")}, rule.LinearFact),
+		rule.NewFact(allowedFact, []term.Term{term.NewConstant("sender7"), term.NewVariable("r")}, rule.PersistentFact),
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := conflictSetFactsForConfig(c, body).Size(); got != recipients {
+			b.Fatalf("bindings = %d, want %d", got, recipients)
+		}
 	}
 }

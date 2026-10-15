@@ -131,7 +131,7 @@ func collectIndexNeeds[T Unifier[T]](body []T, indexable func(T) bool, name func
 	return needsByKey, needAllIndices
 }
 
-func (c argConstraints) matchesArgs(fArgs []term.Term) bool {
+func (c *argConstraints) matchesArgs(fArgs []term.Term) bool {
 	if len(fArgs) != c.arity {
 		return false
 	}
@@ -615,9 +615,50 @@ func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
 			continue
 		}
 		seen[name] = struct{}{}
-		items = append(items, c.factsByName[name]...)
+		items = appendConstCandidates(items, c.factsByName[name], body, name)
 	}
 	return conflictSetFacts(items, body)
+}
+
+// constCandidateMinBucket is the bucket size from which
+// appendConstCandidates filters a bucket instead of appending all of it.
+const constCandidateMinBucket = 32
+
+// appendConstCandidates appends the facts of bucket that can match at least
+// one body pattern named name, judged by the argument checks of matchesArgs.
+// If some pattern with that name has no constant argument, the whole bucket
+// is appended.
+//
+// Otherwise conflictSet applies matchesArgs to every candidate of these
+// patterns, so it could not match a dropped fact. The kept facts stay in
+// bucket order, so the bindings and their order are unchanged. The filter
+// keeps the per-call deduplication and indexing of conflictSet
+// proportional to the candidates instead of the whole bucket, which
+// matters for large persistent buckets.
+func appendConstCandidates(items, bucket []*rule.Fact, body []*rule.Fact, name string) []*rule.Fact {
+	if len(bucket) < constCandidateMinBucket {
+		return append(items, bucket...)
+	}
+	var patterns []argConstraints
+	for _, p := range body {
+		if p.Name != name {
+			continue
+		}
+		constraints := buildArgConstraints(p.Args)
+		if len(constraints.constPositions) == 0 {
+			return append(items, bucket...)
+		}
+		patterns = append(patterns, constraints)
+	}
+	for _, f := range bucket {
+		for i := range patterns {
+			if patterns[i].matchesArgs(f.Args) {
+				items = append(items, f)
+				break
+			}
+		}
+	}
+	return items
 }
 
 type bindingSet struct {
