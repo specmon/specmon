@@ -84,24 +84,32 @@ func (h *HashMap[K, V]) Empty() bool {
 	return len(h.m) == 0
 }
 
+// Keys returns the keys in ascending order of their hashes, so that the
+// order does not change from run to run.
 func (h *HashMap[K, V]) Keys() []K {
 	keys := make([]K, 0, h.Size())
-
-	for _, entry := range h.m {
-		keys = append(keys, entry.Key)
+	for _, hash := range h.sortedHashes() {
+		keys = append(keys, h.m[hash].Key)
 	}
-
 	return keys
 }
 
+// Values returns the values in ascending order of the hashes of their keys.
 func (h *HashMap[K, V]) Values() []V {
 	values := make([]V, 0, h.Size())
-
-	for _, entry := range h.m {
-		values = append(values, entry.Value)
+	for _, hash := range h.sortedHashes() {
+		values = append(values, h.m[hash].Value)
 	}
-
 	return values
+}
+
+func (h *HashMap[K, V]) sortedHashes() []uint64 {
+	hashes := make([]uint64, 0, len(h.m))
+	for hash := range h.m {
+		hashes = append(hashes, hash)
+	}
+	slices.Sort(hashes)
+	return hashes
 }
 
 func (h *HashMap[K, V]) Size() int {
@@ -111,7 +119,8 @@ func (h *HashMap[K, V]) Size() int {
 func (h *HashMap[K, V]) String() string {
 	s := "HashMap["
 
-	for _, entry := range h.m {
+	for _, hash := range h.sortedHashes() {
+		entry := h.m[hash]
 		s += fmt.Sprintf("%v", entry.Key)
 		s += ":"
 		s += fmt.Sprintf("%v", entry.Value)
@@ -123,28 +132,20 @@ func (h *HashMap[K, V]) String() string {
 }
 
 func (h *HashMap[K, V]) Iterate(f func(K, V) bool) {
-	for _, entry := range h.m {
+	for _, hash := range h.sortedHashes() {
+		entry, ok := h.m[hash]
+		if !ok {
+			continue
+		}
 		if !f(entry.Key, entry.Value) {
 			break
 		}
 	}
 }
 
+// IterateSorted is Iterate, which visits the entries in hash order.
 func (h *HashMap[K, V]) IterateSorted(f func(K, V) bool) {
-	keys := make([]uint64, 0, len(h.m))
-
-	for k := range h.m {
-		keys = append(keys, k)
-	}
-
-	slices.Sort(keys)
-
-	for _, k := range keys {
-		entry := h.m[k]
-		if !f(entry.Key, entry.Value) {
-			break
-		}
-	}
+	h.Iterate(f)
 }
 
 func (h *HashMap[K, V]) Clone() *HashMap[K, V] {

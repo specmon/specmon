@@ -68,8 +68,8 @@ func (h HashSet[T]) Values() []T {
 func (h HashSet[T]) String() string {
 	s := "HashSet["
 
-	for _, entry := range h.m.m {
-		s += fmt.Sprintf("%v", entry.Key)
+	for _, key := range h.m.Keys() {
+		s += fmt.Sprintf("%v", key)
 		s += " "
 	}
 	s = strings.TrimSuffix(s, " ")
@@ -78,8 +78,8 @@ func (h HashSet[T]) String() string {
 }
 
 func (h HashSet[T]) Iterate(f func(T) bool) {
-	for _, entry := range h.m.m {
-		if !f(entry.Key) {
+	for _, key := range h.m.Keys() {
+		if !f(key) {
 			break
 		}
 	}

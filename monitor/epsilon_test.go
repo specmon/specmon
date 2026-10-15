@@ -87,13 +87,26 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 	one := term.NewConstant("1")
 	two := term.NewConstant("2")
 	triggered := epsilonTestTriggered + "()"
+	// Rules for the depth cases: consuming A and C together leaves no
+	// candidate, consuming one of them leaves the other one's candidate.
+	triggerAC := epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one), linearFact(epsilonTestFactC, one))
+	survivor := epsilonTestTrigger(epsilonTestTriggerName2, linearFact(epsilonTestFactP, one))
+	fromA := epsilonRule("EpsilonTestFromA", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)},
+		[]*rule.Fact{linearFact(epsilonTestActionC)})
+	fromC := epsilonRule("EpsilonTestFromC", []*rule.Fact{linearFact(epsilonTestFactC, x)}, []*rule.Fact{linearFact(epsilonTestFactD, x)},
+		[]*rule.Fact{linearFact(epsilonTestActionC)})
+	failingC := epsilonRule("EpsilonTestFailingC", []*rule.Fact{linearFact(epsilonTestFactC, x)}, []*rule.Fact{linearFact(epsilonTestFactD, x)},
+		[]*rule.Fact{equalAction(x, two)})
+	both := epsilonRule("EpsilonTestBoth", []*rule.Fact{linearFact(epsilonTestFactA, x), linearFact(epsilonTestFactC, y)},
+		[]*rule.Fact{linearFact(epsilonTestFactB, x)}, []*rule.Fact{linearFact(epsilonTestActionB)})
 
 	tests := []struct {
-		name        string
-		rules       []*rule.Rule
-		wantConfigs []string
-		wantActions []string
-		wantErr     error
+		name         string
+		rules        []*rule.Rule
+		wantConfigs  []string
+		wantActions  []string
+		wantErr      error
+		wantFailures FailureCounts
 	}{
 		{
 			name: "no candidate",
@@ -111,7 +124,8 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 				epsilonRule("EpsilonTestCheck", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)},
 					[]*rule.Fact{equalAction(x, two)}),
 			},
-			wantErr: ErrNoApplicableRule,
+			wantErr:      ErrNoApplicableRule,
+			wantFailures: FailureCounts{Restriction: 1},
 		},
 		{
 			name: "one candidate fails and one survives",
@@ -122,8 +136,9 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 				epsilonRule("EpsilonTestCheckTwo", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactC, x)},
 					[]*rule.Fact{equalAction(x, two)}),
 			},
-			wantConfigs: []string{factProjection(linearFact(epsilonTestFactB, one))},
-			wantActions: []string{triggered + "\x1eEq('1', '1')"},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactB, one))},
+			wantActions:  []string{triggered + "\x1eEq('1', '1')"},
+			wantFailures: FailureCounts{Restriction: 1},
 		},
 		{
 			name: "rules sharing a linear premise branch",
@@ -178,27 +193,53 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 				epsilonRule("EpsilonTestEnd", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)},
 					[]*rule.Fact{equalAction(x, one)}),
 			},
-			wantConfigs: []string{factProjection(linearFact(epsilonTestFactB, one))},
-			wantActions: []string{triggered + "\x1eEq('1', '1')"},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactB, one))},
+			wantActions:  []string{triggered + "\x1eEq('1', '1')"},
+			wantFailures: FailureCounts{Restriction: 1},
 		},
 		{
-			name: "independent candidates",
-			rules: []*rule.Rule{
-				epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one), linearFact(epsilonTestFactC, one)),
-				epsilonRule("EpsilonTestFromA", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)}, nil),
-				epsilonRule("EpsilonTestFromC", []*rule.Fact{linearFact(epsilonTestFactC, x)}, []*rule.Fact{linearFact(epsilonTestFactD, x)}, nil),
-			},
-			wantErr: ErrEpsilonDepth,
+			// Each successor keeps the other rule's candidate, so both are
+			// pruned and no branch is left.
+			name:         "independent candidates",
+			rules:        []*rule.Rule{triggerAC, fromA, fromC},
+			wantErr:      ErrNoApplicableRule,
+			wantFailures: FailureCounts{EpsilonDepth: 2},
 		},
 		{
-			name: "residual failing candidate",
-			rules: []*rule.Rule{
-				epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one), linearFact(epsilonTestFactC, one)),
-				epsilonRule("EpsilonTestFromA", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)}, nil),
-				epsilonRule("EpsilonTestFailingC", []*rule.Fact{linearFact(epsilonTestFactC, x)}, []*rule.Fact{linearFact(epsilonTestFactD, x)},
-					[]*rule.Fact{equalAction(x, two)}),
-			},
-			wantErr: ErrEpsilonDepth,
+			// Nothing of the pruned successors is published.
+			name:         "one valid and two pruned successors/valid first",
+			rules:        []*rule.Rule{triggerAC, both, fromA, fromC},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactB, one))},
+			wantActions:  []string{triggered + "\x1e" + epsilonTestActionB + "()"},
+			wantFailures: FailureCounts{EpsilonDepth: 2},
+		},
+		{
+			name:         "one valid and two pruned successors/valid last",
+			rules:        []*rule.Rule{triggerAC, fromC, fromA, both},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactB, one))},
+			wantActions:  []string{triggered + "\x1e" + epsilonTestActionB + "()"},
+			wantFailures: FailureCounts{EpsilonDepth: 2},
+		},
+		{
+			// A candidate whose restriction would fail still prunes.
+			name:         "residual failing candidate",
+			rules:        []*rule.Rule{triggerAC, fromA, failingC},
+			wantErr:      ErrNoApplicableRule,
+			wantFailures: FailureCounts{Restriction: 1, EpsilonDepth: 1},
+		},
+		{
+			name:         "residual failing candidate/beside a survivor first",
+			rules:        []*rule.Rule{survivor, triggerAC, fromA, failingC},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactP, one))},
+			wantActions:  []string{triggered},
+			wantFailures: FailureCounts{Restriction: 1, EpsilonDepth: 1},
+		},
+		{
+			name:         "residual failing candidate/beside a survivor last",
+			rules:        []*rule.Rule{triggerAC, fromA, failingC, survivor},
+			wantConfigs:  []string{factProjection(linearFact(epsilonTestFactP, one))},
+			wantActions:  []string{triggered},
+			wantFailures: FailureCounts{Restriction: 1, EpsilonDepth: 1},
 		},
 		{
 			name: "two linear occurrences",
@@ -206,7 +247,8 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 				epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one), linearFact(epsilonTestFactA, two)),
 				epsilonRule("EpsilonTestPromote", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)}, nil),
 			},
-			wantErr: ErrEpsilonDepth,
+			wantErr:      ErrNoApplicableRule,
+			wantFailures: FailureCounts{EpsilonDepth: 2},
 		},
 		{
 			name: "two value-equal copies",
@@ -214,7 +256,8 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 				epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one), linearFact(epsilonTestFactA, one)),
 				epsilonRule("EpsilonTestPromote", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)}, nil),
 			},
-			wantErr: ErrEpsilonDepth,
+			wantErr:      ErrNoApplicableRule,
+			wantFailures: FailureCounts{EpsilonDepth: 1},
 		},
 	}
 
@@ -223,9 +266,13 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 			t.Parallel()
 			m := newEpsilonTestMonitor(t, test.rules...)
 			actions, err := m.ProcessEvent(epsilonTestEvent())
+			wantFailures(t, m, test.wantFailures)
 			if test.wantErr != nil {
 				if !errors.Is(err, test.wantErr) {
 					t.Fatalf("ProcessEvent error = %v, want %v", err, test.wantErr)
+				}
+				if configs := m.Configs(); len(configs) != 0 {
+					t.Fatalf("configurations after the rejection = %v, want none", configs)
 				}
 				return
 			}
@@ -242,22 +289,32 @@ func TestProcessEventEpsilonBranches(t *testing.T) {
 	}
 }
 
-// TestHandleEpsilonReportsChainedCandidate checks the depth check at run
+// TestHandleEpsilonPrunesChainedCandidate checks the depth check at run
 // time. The static condition rejects a rule set with chained epsilon
-// rules, so the second rule is added after construction.
-func TestHandleEpsilonReportsChainedCandidate(t *testing.T) {
+// rules, so the second rule is added after construction. The successor in
+// which the chained rule is a candidate is pruned, so no branch is left.
+// The depth error that is the reason names the chained rule.
+func TestHandleEpsilonPrunesChainedCandidate(t *testing.T) {
 	t.Parallel()
 
 	x := term.NewVariable("x")
+	one := term.NewConstant("1")
 	m := newEpsilonTestMonitor(t,
-		epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, term.NewConstant("1"))),
+		epsilonTestTrigger(epsilonTestTriggerName, linearFact(epsilonTestFactA, one)),
 		epsilonRule("EpsilonTestFirst", []*rule.Fact{linearFact(epsilonTestFactA, x)}, []*rule.Fact{linearFact(epsilonTestFactB, x)}, nil))
 	chained := epsilonRule("EpsilonTestSecond", []*rule.Fact{linearFact(epsilonTestFactB, x)}, []*rule.Fact{linearFact(epsilonTestFactC, x)}, nil)
 	m.epsilonRules = append(m.epsilonRules, chained)
 	m.requirements[chained] = computeRequirements(chained.LHS)
 
-	if _, err := m.ProcessEvent(epsilonTestEvent()); !errors.Is(err, ErrEpsilonDepth) || !strings.Contains(err.Error(), chained.Name) {
-		t.Fatalf("ProcessEvent error = %v, want ErrEpsilonDepth naming %s", err, chained.Name)
+	if _, err := m.ProcessEvent(epsilonTestEvent()); !errors.Is(err, ErrNoApplicableRule) {
+		t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule", err)
+	}
+	wantFailures(t, m, FailureCounts{EpsilonDepth: 1})
+
+	successor := NewConfig()
+	successor.AddFact(linearFact(epsilonTestFactB, one))
+	if err := m.checkEpsilonDepth(successor); !errors.Is(err, ErrEpsilonDepth) || !strings.Contains(err.Error(), chained.Name) {
+		t.Fatalf("checkEpsilonDepth = %v, want ErrEpsilonDepth naming %s", err, chained.Name)
 	}
 }
 

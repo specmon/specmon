@@ -196,9 +196,18 @@ rule Reject [no-decomp, trigger=[<monitorTestRewrittenEvent(), <>>]]:
 				t.Fatalf("RunE error = %v, want ErrNoApplicableRule", err)
 			}
 
+			// The failure report follows the hook.
+			prefix := "  core event 2"
+			if config.RewriteWith != "" {
+				prefix += " (raw event 2, alternative 1, position 1)"
+			}
+			prefix += " branch "
 			lines := strings.Split(out.String(), "\n")
-			if len(lines) != 4 || lines[0]+"\n" != consumedOutputLine(1) ||
-				!strings.HasPrefix(lines[1], "{") || lines[2] != "hook" || lines[3] != "" {
+			if len(lines) != 7 || lines[0]+"\n" != consumedOutputLine(1) ||
+				!strings.HasPrefix(lines[1], "{") || lines[2] != "hook" ||
+				lines[3] != "failed candidates and branches at the rejected event:" ||
+				!strings.HasPrefix(lines[4], prefix) ||
+				lines[5] != "failure counts: no_candidate 1" || lines[6] != "" {
 				t.Fatalf("output order = %q", out.String())
 			}
 		})

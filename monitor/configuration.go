@@ -170,11 +170,12 @@ func (b factBucket) appendFacts(out []*rule.Fact) []*rule.Fact {
 
 // Facts materialises the flat fact list by concatenating every bucket,
 // with one element per copy. The returned slice is freshly allocated. The
-// order is bucket-iteration order (Go map iteration, not insertion order).
+// buckets are in the order of their fact names, and the facts of a bucket
+// in the order in which they were added.
 func (c *Config) Facts() []*rule.Fact {
 	out := make([]*rule.Fact, 0, c.factCount)
-	for _, bucket := range c.factsByName {
-		out = bucket.appendFacts(out)
+	for _, name := range slices.Sorted(maps.Keys(c.factsByName)) {
+		out = c.factsByName[name].appendFacts(out)
 	}
 	return out
 }

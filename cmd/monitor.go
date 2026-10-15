@@ -173,6 +173,9 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(cmd.ErrOrStderr(), "signal received, exiting")
 			return flushErr
 		}
+		// A rejection on the rewrite side is not a violation: it runs no
+		// hook, and its reasons appear here only.
+		writeRejectionReport(cmd.ErrOrStderr(), runErr, m)
 		return fmt.Errorf("monitor events: %w", runErr)
 	}
 
@@ -198,6 +201,7 @@ func (r *MonitorConfig) handleViolation(
 			fmt.Fprintf(cmd.ErrOrStderr(), "failed to kill process: %v\n", err)
 		}
 	}
+	writeFailureReport(cmd.ErrOrStderr(), violation.Failures)
 }
 
 // violationError is the error with which a violation ends the command. It

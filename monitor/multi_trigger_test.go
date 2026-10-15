@@ -166,6 +166,9 @@ func processPrioritizedReferenceEvent(
 		}
 	}
 
+	// A failed candidate ends only its own branch inside the handlers, so
+	// an error here is fatal. Without a surviving branch no configuration
+	// stays live.
 	updated := data.NewHashSet[*Config]()
 	var actions [][]*rule.Fact
 	for _, config := range m.configs.Values() {
@@ -180,10 +183,10 @@ func processPrioritizedReferenceEvent(
 			}
 		}
 	}
+	m.configs = updated
 	if updated.Empty() {
 		return nil, ErrNoApplicableRule
 	}
-	m.configs = updated
 	return actions, nil
 }
 
@@ -204,14 +207,11 @@ func prioritizedReferenceApplications(
 	var candidates []candidate
 	for _, entry := range m.triggerRules[key] {
 		role, generated := roles[entry.rule]
-		if generated && !role.start {
-			matched := referenceContinuationAnchored(config, event, entry.rule)
-			if matched {
-				anchored[role.sourceOrdinal] = true
-			}
+		if generated && !role.start && referenceContinuationAnchored(config, event, entry.rule) {
+			anchored[role.sourceOrdinal] = true
 		}
 
-		next, _, err := m.handleTriggers(config, event, entry.rule)
+		next, err := m.handleTriggers(config, event, entry.rule)
 		if err != nil {
 			return nil, err
 		}
@@ -231,8 +231,8 @@ func prioritizedReferenceApplications(
 		}
 		applications = append(applications, candidate.application)
 	}
-	for _, r := range m.hintRules[key] {
-		next, err := m.handleHints(config, event, r)
+	for _, entry := range m.hintRules[key] {
+		next, err := m.handleHints(config, event, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -241,6 +241,8 @@ func prioritizedReferenceApplications(
 	return applications, nil
 }
 
+// referenceContinuationAnchored reports whether a continuation matches the
+// event in config. Mismatches and failed evaluations do not anchor.
 func referenceContinuationAnchored(config *Config, event term.Term, r *rule.Rule) bool {
 	if !canMatchLHS(config, computeRequirements(r.LHS)) {
 		return false
@@ -726,7 +728,7 @@ func TestMultiTriggerReferenceRunsEpsilonAfterTransitions(t *testing.T) {
 // TestMultiTriggerCompletionIsEpsilonStep checks that the completion of a
 // native multi-trigger application is the epsilon step of its last block,
 // as the end rule is for a split rule: no epsilon rule runs after it, and
-// an epsilon candidate left by it is an error.
+// a completion that leaves an epsilon candidate is pruned.
 func TestMultiTriggerCompletionIsEpsilonStep(t *testing.T) {
 	t.Parallel()
 
@@ -744,22 +746,41 @@ func TestMultiTriggerCompletionIsEpsilonStep(t *testing.T) {
 	native := triggerRule("MultiCompletion", []*rule.Fact{reserved}, []*rule.Fact{finished}, nil,
 		eventTerm(firstEventName, unit), eventTerm(secondEventName, unit))
 
-	after := epsilonRule("MultiCompletionAfter", []*rule.Fact{finished},
-		[]*rule.Fact{rule.NewFact(doneFactName, nil, rule.LinearFact)}, nil)
-	m := newEpsilonTestMonitor(t, native, after)
-	m.Configs()[0].AddFact(reserved)
-	if _, err := m.ProcessEvent(eventTerm(firstEventName, unit)); err != nil {
-		t.Fatalf("ProcessEvent(start): %v", err)
-	}
-	if _, err := m.ProcessEvent(eventTerm(secondEventName, unit)); !errors.Is(err, ErrEpsilonDepth) {
-		t.Fatalf("ProcessEvent(completion) error = %v, want ErrEpsilonDepth", err)
-	}
+	t.Run("without candidate", func(t *testing.T) {
+		t.Parallel()
+		m := newEpsilonTestMonitor(t, native)
+		m.Configs()[0].AddFact(reserved)
+		for _, event := range []term.Term{eventTerm(firstEventName, unit), eventTerm(secondEventName, unit)} {
+			if _, err := m.ProcessEvent(event); err != nil {
+				t.Fatalf("ProcessEvent(%s): %v", event, err)
+			}
+		}
+		if got, want := publicConfigProjection(m, nil), []string{factProjection(finished)}; !slices.Equal(got, want) {
+			t.Fatalf("configs = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("candidate after completion", func(t *testing.T) {
+		t.Parallel()
+		after := epsilonRule("MultiCompletionAfter", []*rule.Fact{finished},
+			[]*rule.Fact{rule.NewFact(doneFactName, nil, rule.LinearFact)}, nil)
+		m := newEpsilonTestMonitor(t, native, after)
+		m.Configs()[0].AddFact(reserved)
+		if _, err := m.ProcessEvent(eventTerm(firstEventName, unit)); err != nil {
+			t.Fatalf("ProcessEvent(start): %v", err)
+		}
+		if _, err := m.ProcessEvent(eventTerm(secondEventName, unit)); !errors.Is(err, ErrNoApplicableRule) {
+			t.Fatalf("ProcessEvent(completion) error = %v, want ErrNoApplicableRule", err)
+		}
+		wantFailures(t, m, FailureCounts{EpsilonDepth: 1})
+	})
 }
 
 // TestHintContinuationUsesSingleTriggerRules checks that a hint
 // continuation consumes the event only with rules with a single trigger:
 // it neither starts nor advances a native multi-trigger application. The
-// hint candidate then has no continuation, which is an error.
+// hint candidate then has no continuation. It is a dead hint, and without
+// another branch the event is rejected.
 func TestHintContinuationUsesSingleTriggerRules(t *testing.T) {
 	t.Parallel()
 
@@ -791,10 +812,11 @@ func TestHintContinuationUsesSingleTriggerRules(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name   string
-		hint   *rule.Rule
-		facts  []*rule.Fact
-		events []term.Term
+		name        string
+		hint        *rule.Rule
+		facts       []*rule.Fact
+		events      []term.Term
+		wantConfigs []string
 	}{
 		{
 			// The hint provides the resource that a start would reserve.
@@ -805,11 +827,13 @@ func TestHintContinuationUsesSingleTriggerRules(t *testing.T) {
 		},
 		{
 			// The application is started directly. The hint's
-			// continuation could complete it.
-			name:   "no advance",
-			hint:   hint(finishEvent, rule.NewFact(hintDoneFactName, nil, rule.LinearFact)),
-			facts:  []*rule.Fact{hintReady, resource},
-			events: []term.Term{startEvent, finishEvent},
+			// continuation could complete it. The direct completion
+			// survives beside the dead hint.
+			name:        "no advance",
+			hint:        hint(finishEvent, rule.NewFact(hintDoneFactName, nil, rule.LinearFact)),
+			facts:       []*rule.Fact{hintReady, resource},
+			events:      []term.Term{startEvent, finishEvent},
+			wantConfigs: []string{factProjection(rule.NewFact(finishedFactName, nil, rule.LinearFact), hintReady)},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -825,9 +849,17 @@ func TestHintContinuationUsesSingleTriggerRules(t *testing.T) {
 				}
 			}
 			_, err := m.ProcessEvent(test.events[last])
-			if !errors.Is(err, ErrNoApplicableRule) || !strings.Contains(err.Error(), "after accepting hint") {
-				t.Fatalf("ProcessEvent error = %v, want no continuation after the hint", err)
+			wantFailures(t, m, FailureCounts{DeadHint: 1})
+			if test.wantConfigs == nil {
+				if !errors.Is(err, ErrNoApplicableRule) {
+					t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule for a dead hint", err)
+				}
+				return
 			}
+			if err != nil {
+				t.Fatalf("ProcessEvent: %v", err)
+			}
+			wantConfigs(t, m, test.wantConfigs...)
 		})
 	}
 }
@@ -1062,12 +1094,12 @@ func TestMultiTriggerReferenceCompletionFailures(t *testing.T) {
 		{
 			name:      "invalid RHS",
 			rhs:       []*rule.Fact{rule.NewFact(invalidFactName, []term.Term{invalid}, rule.LinearFact)},
-			wantError: "evaluation",
+			wantError: ViolationKindNoApplicableRule,
 		},
 		{
 			name:      "invalid action",
 			actions:   []*rule.Fact{rule.NewFact(invalidFactName, []term.Term{invalid}, rule.LinearFact)},
-			wantError: "evaluation",
+			wantError: ViolationKindNoApplicableRule,
 		},
 	}
 	for _, test := range tests {
@@ -1281,7 +1313,7 @@ func TestMultiTriggerReferenceCandidateEvaluationPriority(t *testing.T) {
 				eventTerm(startEventName, one),
 				eventTerm(finishEventName, two),
 			},
-			wantReferenceErrors: map[int]string{1: "no_applicable_rule"},
+			wantReferenceErrors: map[int]string{1: ViolationKindNoApplicableRule},
 		})
 	})
 }
@@ -1386,7 +1418,10 @@ func TestHintFirstComputationsRemainUnordered(t *testing.T) {
 	}
 }
 
-func TestHintCandidateEvaluationFailuresDoNotMatch(t *testing.T) {
+// TestHintCandidateEvaluationFailuresAreLocal checks that failed
+// evaluations of a trigger and a hint candidate end only those
+// candidates. Without another candidate the event is rejected.
+func TestHintCandidateEvaluationFailuresAreLocal(t *testing.T) {
 	value := term.NewVariable("hintEvaluationValue")
 	one := term.NewConstant[int64](1)
 	two := term.NewConstant[int64](2)
@@ -1413,8 +1448,11 @@ func TestHintCandidateEvaluationFailuresDoNotMatch(t *testing.T) {
 	mon.Configs()[0].AddFact(rule.NewFact("HintEvaluationDirect", []term.Term{one}, rule.LinearFact))
 	mon.Configs()[0].AddFact(rule.NewFact("HintEvaluationStart", []term.Term{one}, rule.LinearFact))
 	if _, err := mon.ProcessEvent(event); !errors.Is(err, ErrNoApplicableRule) {
-		t.Fatalf("ProcessEvent error = %v, want no applicable rule", err)
+		t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule", err)
 	}
+	// A candidate that cannot be evaluated does not match the event, so the
+	// configuration had no candidate.
+	wantFailures(t, mon, FailureCounts{NoCandidate: 1})
 }
 
 // TestFindPossibleEventsSubstitutesRuleAttributes checks that the allowed
@@ -1432,7 +1470,7 @@ func TestFindPossibleEventsSubstitutesRuleAttributes(t *testing.T) {
 	m, _ := acceptEvents(t, []*rule.Rule{r, native}, []*rule.Fact{state(input)}, eventTerm("multiPossibleFirst", input))
 
 	var possible []term.Term
-	for _, events := range m.findPossibleEvents() {
+	for _, events := range m.possibleEvents(m.Configs()) {
 		possible = append(possible, events...)
 	}
 	for _, want := range []term.Term{
@@ -1556,8 +1594,8 @@ func BenchmarkFindPossibleEvents(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if events := mon.findPossibleEvents(); len(events) != 1 || len(events[0]) != 2*ruleCount {
-			b.Fatalf("findPossibleEvents returned %d configurations", len(events))
+		if events := mon.possibleEvents(mon.Configs()); len(events) != 1 || len(events[0]) != 2*ruleCount {
+			b.Fatalf("possibleEvents returned %d configurations", len(events))
 		}
 	}
 }
@@ -1610,6 +1648,34 @@ func silenceBenchmarkLogs(b *testing.B) {
 	level := log.GetLevel()
 	log.SetLevel(log.WarnLevel)
 	b.Cleanup(func() { log.SetLevel(level) })
+}
+
+// TestNativeStartComparesTheEvaluatedEvent checks that a native trigger
+// that can match only after premise substitution is tried when the event
+// contains a computation at a position where the trigger has a constant.
+func TestNativeStartComparesTheEvaluatedEvent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		callName     = "nativeEvaluatedCall"
+		finishName   = "nativeEvaluatedFinish"
+		premiseName  = "NativeEvaluatedPremise"
+		finishedName = "NativeEvaluatedFinished"
+	)
+	y := term.NewVariable("nativeEvaluatedY")
+	add := func(a, b term.Term) term.Term { return term.NewFunction(term.AddFunctionName, []term.Term{a, b}) }
+	call := func(result term.Term, args ...term.Term) term.Term {
+		return term.NewFunction(term.PairFunctionName, []term.Term{term.NewFunction(callName, args), result})
+	}
+	unit := term.NewFunction(term.PairFunctionName, nil)
+	native := triggerRule("NativeEvaluated", []*rule.Fact{rule.NewFact(premiseName, []term.Term{y}, rule.LinearFact)},
+		[]*rule.Fact{rule.NewFact(finishedName, nil, rule.LinearFact)}, nil,
+		call(term.NewVariable("nativeEvaluatedR"), term.NewConstant[int64](3), add(y, term.NewConstant[int64](0))),
+		eventTerm(finishName, unit))
+	first := call(term.NewConstant[int64](7), add(term.NewConstant[int64](1), term.NewConstant[int64](2)), term.NewConstant[int64](5))
+	m, _ := acceptEvents(t, []*rule.Rule{native}, []*rule.Fact{rule.NewFact(premiseName, []term.Term{term.NewConstant[int64](5)}, rule.LinearFact)},
+		first, eventTerm(finishName, unit))
+	wantConfigs(t, m, factProjection(rule.NewFact(finishedName, nil, rule.LinearFact)))
 }
 
 // TestMonitorPremiseWithRepeatedVariable applies a rule whose premise

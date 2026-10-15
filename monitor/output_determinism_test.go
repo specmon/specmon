@@ -73,8 +73,12 @@ func TestRewriteOutputRejectsBoundInvalidHeads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := advanceMainConfigs(main, []*Config{NewConfig()}, []*term.Function{output}, 0); err == nil {
-			t.Fatalf("integrated output accepted %s", output)
+		result, err := advanceMainConfigs(main, []*Config{NewConfig()}, []*term.Function{output}, 0, 0, RewritePosition{})
+		if err != nil || result.failure == nil || len(result.configs) != 0 {
+			t.Fatalf("integrated output result = %v, %v for %s", result, err, output)
+		}
+		if main.FailureReport().Counts.NoCandidate != 1 {
+			t.Fatal("missing invalid-output failure record")
 		}
 	}
 }

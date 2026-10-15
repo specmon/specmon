@@ -166,9 +166,9 @@ func TestRunPipelinePairsRewriteAndMainStates(t *testing.T) {
 	if want := []string{a.String()}; !slices.Equal(consumed, want) {
 		t.Fatalf("consumed = %q, want %q", consumed, want)
 	}
-	// Both monitors keep the configurations before the rejected event.
-	wantConfigs(t, rewriter, factProjection(state("PairedRewriteDoneA")...), factProjection(state("PairedRewriteDoneB")...))
-	wantConfigs(t, main, factProjection(), factProjection(state("PairedMainSeenA")...))
+	// No configuration of either monitor stays live after the rejection.
+	wantConfigs(t, rewriter)
+	wantConfigs(t, main)
 }
 
 // TestRunPipelineReportsFailureWithinRewriteOutputSequence checks a raw
@@ -195,7 +195,7 @@ func TestRunPipelineReportsFailureWithinRewriteOutputSequence(t *testing.T) {
 		violation.Stats.Received != 2 || violation.Stats.Processed != 1 {
 		t.Fatalf("unexpected output-sequence violation: %+v", violation)
 	}
-	wantConfigs(t, main, factProjection())
+	wantConfigs(t, main)
 }
 
 // TestRunPipelineConsumesEqualOutputsOnce checks that two rewrite branches

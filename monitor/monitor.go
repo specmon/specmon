@@ -46,7 +46,8 @@ var (
 	ErrNoApplicableRule    = errors.New("no applicable rule found")
 	ErrRestrictionViolated = errors.New("restriction violated")
 	// ErrEpsilonDepth reports an epsilon candidate that is left after the
-	// epsilon step of a transition.
+	// epsilon step of a transition. The branch that reaches such a
+	// configuration is pruned.
 	ErrEpsilonDepth = errors.New("epsilon rule applicable after an epsilon step")
 	// ErrNondeterministicRewrite reports that the rule applications for one
 	// event emit different event sequences, which a single output stream
@@ -70,7 +71,12 @@ type ruleKey struct {
 	arity int
 }
 
-type triggerRuleEntry struct {
+// ruleEntry is a rule with a trigger or hint of one key, with its index in
+// the rules of the monitor. lhsVariables, the premise variables, are set
+// for a rule with several triggers and for a hint rule: a pattern that
+// does not match an event can match once they are substituted only if it
+// contains one of them.
+type ruleEntry struct {
 	ordinal      int
 	rule         *rule.Rule
 	lhsVariables []*term.Variable
@@ -81,12 +87,12 @@ type Monitor struct {
 	// triggerRules maps event (name, arity) to rules whose triggers
 	// contain a term with that signature. Pre-filtered so hot-loop
 	// callers don't repeat HasTriggers().
-	triggerRules map[ruleKey][]triggerRuleEntry
+	triggerRules map[ruleKey][]ruleEntry
 
 	// hintRules maps event (name, arity) to rules whose hints contain a
 	// term with that signature. Pre-filtered so hot-loop callers don't
 	// repeat HasHints().
-	hintRules map[ruleKey][]*rule.Rule
+	hintRules map[ruleKey][]ruleEntry
 
 	// epsilonRules are rules without triggers or hints, applied
 	// directly to the configuration.
@@ -123,8 +129,19 @@ type Monitor struct {
 	// per-Equal cost to neutral, revisit an Equal-checking container.
 	configs *data.HashSet[*Config]
 
+	// rejected holds the configurations from which the last event was
+	// rejected, after which configs is empty. Only the diagnostics read
+	// it. It never becomes live again.
+	rejected *data.HashSet[*Config]
+
 	// stats includes the statistics of the monitor.
 	stats *Stats
+
+	// failures keeps the records of failed candidates and branches. The
+	// pipeline shares the log of its core monitor with its rewriter.
+	failures *failureLog
+	// site is where the records of the current event are made.
+	site failureSite
 }
 
 // computeRequirements returns a lower bound on each predicate's stored
@@ -166,9 +183,15 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 	if err := checkWellformedness(rules); err != nil {
 		return nil, err
 	}
+	return newMonitor(rules)
+}
 
-	triggerRules := make(map[ruleKey][]triggerRuleEntry)
-	hintRules := make(map[ruleKey][]*rule.Rule)
+// newMonitor returns a monitor for rules without checking that they are
+// admitted. Only tests of the invariants that admission ensures use it
+// directly.
+func newMonitor(rules []*rule.Rule) (*Monitor, error) {
+	triggerRules := make(map[ruleKey][]ruleEntry)
+	hintRules := make(map[ruleKey][]ruleEntry)
 	var epsilonRules []*rule.Rule
 	requirements := make(map[*rule.Rule]map[string]int, len(rules))
 
@@ -205,7 +228,7 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 					continue
 				}
 				seenKeys[k] = struct{}{}
-				triggerRules[k] = append(triggerRules[k], triggerRuleEntry{
+				triggerRules[k] = append(triggerRules[k], ruleEntry{
 					ordinal:      ordinal,
 					rule:         r,
 					lhsVariables: lhsVariables,
@@ -213,6 +236,7 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 			}
 		}
 		if hasHints {
+			entry := ruleEntry{ordinal: ordinal, rule: r, lhsVariables: rule.Facts(r.LHS).Vars()}
 			seenKeys := make(map[ruleKey]struct{}, len(r.Hints()))
 			for _, t := range r.Hints() {
 				k, err := ruleKeyForTerm(t)
@@ -223,7 +247,7 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 					continue
 				}
 				seenKeys[k] = struct{}{}
-				hintRules[k] = append(hintRules[k], r)
+				hintRules[k] = append(hintRules[k], entry)
 			}
 		}
 	}
@@ -236,6 +260,8 @@ func NewMonitor(rules []*rule.Rule) (*Monitor, error) {
 		rules:        slices.Clone(rules),
 		configs:      data.NewHashSet(NewConfig()),
 		stats:        &Stats{},
+		failures:     &failureLog{},
+		site:         failureSite{monitor: FailureMonitorCore},
 	}, nil
 }
 
@@ -270,6 +296,10 @@ type RuleApplication struct {
 // ProcessEvent consumes an event and performs the necessary monitoring actions.
 // It returns the action facts produced by each successful rule application
 // (one slice per RuleApplication) and an error if processing failed.
+//
+// A candidate that fails ends only its own branch. If no branch is left,
+// the error is ErrNoApplicableRule and no configuration stays live, so
+// every later event is rejected as well.
 func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 	applications, err := m.processEvent(a)
 	if err != nil {
@@ -290,6 +320,7 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 func (m *Monitor) processEvent(a term.Term) ([]RuleApplication, error) {
 	log.Debugf("ProcessEvent(%s)\n", a)
 
+	m.beginEvent()
 	updated := data.NewHashSet[*Config]()
 	var applied []RuleApplication
 
@@ -315,14 +346,14 @@ func (m *Monitor) processEvent(a term.Term) ([]RuleApplication, error) {
 	}
 
 	if updated.Empty() {
-		possibleEvents := m.findPossibleEvents()
-		for i, events := range possibleEvents {
-			log.Errorf("allowed events in configuration %d:\n", i)
-			for _, e := range events {
-				log.Errorf("  %.120s\n", e)
-			}
-		}
+		m.logAllowedEvents(m.configs.Values(), func(i int) string { return fmt.Sprintf("allowed events in configuration %d", i) })
 
+		// No branch survives the event, so none stays live. The
+		// configurations before it are kept for the diagnostics only.
+		if !m.configs.Empty() {
+			m.rejected = m.configs
+		}
+		m.configs = updated
 		return nil, ErrNoApplicableRule
 	}
 
@@ -334,44 +365,63 @@ func (m *Monitor) processEvent(a term.Term) ([]RuleApplication, error) {
 // processConfigEvent returns every transition that consumes event from c.
 // It does not mutate m.configs, which keeps a rewrite configuration paired
 // with only the downstream configurations reached through that rewrite path.
+//
+// A failed candidate ends only its own branch and is recorded. The error
+// result is reserved for broken invariants. If no transition consumes the
+// event and no candidate recorded a failure, the branch is recorded as
+// ended without a candidate.
 func (m *Monitor) processConfigEvent(c *Config, event term.Term, key ruleKey) ([]RuleApplication, error) {
-	appliedTriggers, _, err := m.handleTriggerPaths(c, event, key, false)
+	m.site.branch = c
+	recorded := len(m.failures.current)
+	appliedTriggers, err := m.handleTriggerPaths(c, event, key, false)
 	if err != nil {
 		return nil, err
 	}
 
 	var appliedHints []RuleApplication
-	for _, r := range m.hintRules[key] {
-		next, err := m.handleHints(c, event, r)
+	for _, entry := range m.hintRules[key] {
+		next, err := m.handleHints(c, event, entry)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, hinted := range next {
 			// One valid direct continuation from the same family with an
-			// equal binding is enough to suppress the hinted start.
-			suppress := false
-			for _, direct := range appliedTriggers {
-				if rule.IsStartRuleOf(r, direct.rule) && direct.binding.Equal(hinted.binding) {
-					suppress = true
-					break
-				}
+			// equal binding is enough to suppress the hinted start. This
+			// is decided for each hint binding, so a suppressed
+			// alternative does not suppress another one.
+			if slices.ContainsFunc(appliedTriggers, func(direct RuleApplication) bool {
+				return rule.IsStartRuleOf(entry.rule, direct.rule) && direct.binding.Equal(hinted.binding)
+			}) {
+				continue
 			}
-			if !suppress {
-				appliedHints = append(appliedHints, hinted)
-			}
+			appliedHints = append(appliedHints, hinted)
 		}
 	}
 
-	applications := slices.Concat(appliedTriggers, appliedHints)
-	return applications, nil
+	appliedTriggers = append(appliedTriggers, appliedHints...)
+	if len(appliedTriggers) == 0 && len(m.failures.current) == recorded {
+		m.recordFailure(FailureNoCandidate, "", "no rule candidate consumes the event", nil)
+	}
+	return appliedTriggers, nil
 }
 
-// findPossibleEvents returns the events that are possible in each configuration.
-func (m *Monitor) findPossibleEvents() [][]term.Term {
-	events := make([][]term.Term, m.configs.Size())
+// logAllowedEvents logs the events that each of configs allows, under the
+// heading that label gives for its index.
+func (m *Monitor) logAllowedEvents(configs []*Config, label func(int) string) {
+	for i, events := range m.possibleEvents(configs) {
+		log.Errorf("%s:\n", label(i))
+		for _, e := range events {
+			log.Errorf("  %.120s\n", e)
+		}
+	}
+}
 
-	for i, c := range m.configs.Values() {
+// possibleEvents returns the events that are possible in each of configs.
+func (m *Monitor) possibleEvents(configs []*Config) [][]term.Term {
+	events := make([][]term.Term, len(configs))
+
+	for i, c := range configs {
 		var e []term.Term
 		for _, r := range m.rules {
 			for _, b := range conflictSetFactsForConfig(c, r.LHS).Values() {
@@ -397,99 +447,57 @@ func (m *Monitor) findPossibleEvents() [][]term.Term {
 	return events
 }
 
-// getUniqueBinding returns the binding under which target unifies with
-// the hint terms in matches. Equal bindings of several hint terms count
-// once. Distinct bindings are an error, so the hint candidate is skipped.
-func getUniqueBinding(matches []term.Term, target term.Term) (*term.Binding, error) {
-	log.Infof("     getUniqueBinding(%s, %s)\n", matches, target)
-
-	var unique *term.Binding
-
-	for _, t := range matches {
-		u, err := target.Unify(t)
-		log.Infof("    unifying %s with %s with %v\n", target, t, u)
-		if err != nil {
-			log.Infof("              no match: %v\n", err)
-			log.Infof("              u: %v\n", u)
-
-			continue
-		}
-
-		if unique != nil {
-			if unique.Equal(u) {
-				continue
-			}
-			return nil, fmt.Errorf("match with multiple bindings:\n  %s\n  %s", unique, u)
-		}
-
-		log.Infof("              found unique binding: %s\n", u)
-		unique = u
-	}
-
-	if unique == nil {
-		return nil, errors.New("no unique and compatible binding found")
-	}
-
-	return unique, nil
-}
-
 // handleTriggerPaths returns the applications of the trigger rules and
 // pending applications that consume event in c. A hint continuation uses
 // only rules with a single trigger: it neither starts nor advances a
-// pending application of a rule with several triggers. applied reports
-// whether a triggered rule was applied, even if the epsilon step that
-// follows then ended every branch, so that no application remains.
-func (m *Monitor) handleTriggerPaths(c *Config, event term.Term, key ruleKey, hintContinuation bool) ([]RuleApplication, bool, error) {
+// pending application of a rule with several triggers.
+func (m *Monitor) handleTriggerPaths(c *Config, event term.Term, key ruleKey, hintContinuation bool) ([]RuleApplication, error) {
 	var applications []RuleApplication
 	var anchored map[int]bool
-	var applied bool
 	if !hintContinuation {
 		var err error
-		applications, anchored, applied, err = m.advancePending(c, event, key)
+		applications, anchored, err = m.advancePending(c, event, key)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 
 	for _, entry := range m.triggerRules[key] {
 		var next []RuleApplication
-		var nextApplied bool
 		var err error
 		if len(entry.rule.Triggers()) == 1 {
-			next, nextApplied, err = m.handleTriggers(c, event, entry.rule)
+			next, err = m.handleTriggers(c, event, entry.rule)
 		} else {
 			if hintContinuation || anchored[entry.ordinal] {
 				continue
 			}
-			next, nextApplied, err = m.startPending(c, event, key, entry)
+			next, err = m.startPending(c, event, key, entry)
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		applied = applied || nextApplied
 		applications = append(applications, next...)
 	}
 
-	return applications, applied, nil
+	return applications, nil
 }
 
 func (m *Monitor) startPending(
 	c *Config,
 	event term.Term,
 	key ruleKey,
-	entry triggerRuleEntry,
-) ([]RuleApplication, bool, error) {
+	entry ruleEntry,
+) ([]RuleApplication, error) {
 	if !canMatchLHS(c, m.requirements[entry.rule]) {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	var applications []RuleApplication
-	applied := false
 	triggers := entry.rule.Triggers()
 	for slot, trigger := range triggers {
 		triggerKey, err := ruleKeyForTerm(trigger)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if triggerKey != key {
 			continue
@@ -524,9 +532,11 @@ func (m *Monitor) startPending(
 
 			reserved, err := c.reserveRuleLHS(entry.rule, binding, trigger)
 			if err != nil {
-				return nil, false, err
+				if m.recordLocalFailure(entry.rule, err) {
+					continue
+				}
+				return nil, err
 			}
-			applied = true
 			outstanding := make([]int, 0, len(triggers)-1)
 			for i := range triggers {
 				if i != slot {
@@ -540,13 +550,13 @@ func (m *Monitor) startPending(
 			})
 			next, err := m.handleEpsilon(entry.rule, binding.Clone(), reserved, nil)
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
 			applications = append(applications, next...)
 		}
 	}
 
-	return applications, applied, nil
+	return applications, nil
 }
 
 // couldMatch reports whether pattern may match event once the premise
@@ -607,10 +617,9 @@ func (m *Monitor) advancePending(
 	c *Config,
 	event term.Term,
 	key ruleKey,
-) ([]RuleApplication, map[int]bool, bool, error) {
+) ([]RuleApplication, map[int]bool, error) {
 	var applications []RuleApplication
-	anchored := make(map[int]bool)
-	applied := false
+	var anchored map[int]bool
 	for pendingIndex, pending := range c.pending {
 		// Identical entries are instances of the same start. Advancing or
 		// completing any of them gives the same successor and actions, so
@@ -623,7 +632,7 @@ func (m *Monitor) advancePending(
 		for slotPosition, slot := range pending.outstanding {
 			triggerKey, err := ruleKeyForTerm(triggers[slot])
 			if err != nil {
-				return nil, nil, false, err
+				return nil, nil, err
 			}
 			if triggerKey != key {
 				continue
@@ -632,6 +641,9 @@ func (m *Monitor) advancePending(
 			eventBinding, err := event.Unify(instantiated)
 			if err != nil {
 				continue
+			}
+			if anchored == nil {
+				anchored = make(map[int]bool)
 			}
 			anchored[pending.ruleOrdinal] = true
 
@@ -645,10 +657,9 @@ func (m *Monitor) advancePending(
 					binding:     binding,
 					outstanding: outstanding,
 				})
-				applied = true
 				next, err := m.handleEpsilon(r, binding, result, nil)
 				if err != nil {
-					return nil, nil, false, err
+					return nil, nil, err
 				}
 				applications = append(applications, next...)
 				continue
@@ -657,37 +668,38 @@ func (m *Monitor) advancePending(
 			result.removePending(pendingIndex)
 			result, actions, err := result.finalizeReservedRule(r, binding)
 			if err != nil {
-				if errors.Is(err, ErrRestrictionViolated) {
+				if m.recordLocalFailure(r, err) {
 					continue
 				}
-				return nil, nil, false, err
+				return nil, nil, err
 			}
-			applied = true
 			// The completion takes the place of a split rule's end rule,
 			// so it is the epsilon step of the application's last block.
+			// A completion that leaves an epsilon candidate is pruned on
+			// its own. As after a failed completion, the start of this
+			// rule that its match suppressed stays suppressed.
 			if err := m.checkEpsilonDepth(result); err != nil {
-				return nil, nil, false, err
+				m.recordLocalFailure(r, err)
+				continue
 			}
 			applications = append(applications, RuleApplication{
 				rule: r, binding: binding, config: result, actions: actions,
 			})
 		}
 	}
-	return applications, anchored, applied, nil
+	return applications, anchored, nil
 }
 
 // handleTriggers returns the applications of a rule with a single trigger
-// that consume a in c. applied reports whether the rule was applied, even
-// if the epsilon step that follows then ended every branch.
-func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleApplication, bool, error) {
+// that consume a in c.
+func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleApplication, error) {
 	log.Tracef("handleTriggers(%s, %s, %s)\n\n", c, a, r.Name)
 
 	rawTriggers := r.Triggers()
 	if !canMatchLHS(c, m.requirements[r]) {
-		return nil, false, nil
+		return nil, nil
 	}
 	var C []RuleApplication
-	applied := false
 
 	// Try to extract a trigger binding from the event first. When this
 	// succeeds, shared variables narrow the LHS fact search from O(N)
@@ -719,108 +731,149 @@ func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleAp
 			bt = b.Extend(u)
 		}
 
-		if d, acts, err := c.ApplyRule(r, bt); err == nil {
-			log.Infof("rule %s is applicable\n  binding: %s", r.Name, bt)
-
-			applied = true
-
-			// The epsilon step follows the transition.
-			next, err := m.handleEpsilon(r, bt, d, acts)
-			if err != nil {
-				return nil, false, err
-			}
-			C = append(C, next...)
-		} else if errors.Is(err, ErrRestrictionViolated) {
-			log.Infof("rule %s not applicable due to restriction: %v", r.Name, err)
-		} else {
-			return nil, false, err
-		}
-	}
-
-	return C, applied, nil
-}
-
-func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleApplication, error) {
-	log.Tracef("handleHints(%s, %s, %s)\n\n", c, a, r.Name)
-
-	if !canMatchLHS(c, m.requirements[r]) {
-		return nil, nil
-	}
-	var C []RuleApplication
-
-	rawHints := r.Hints()
-
-	// Mirror handleTriggers: extract hint binding from the event first
-	// to narrow the LHS fact search; fall back to the original O(N)
-	// approach when hint evaluation requires LHS-derived bindings.
-	hintBinding, hintErr := getUniqueBinding(rawHints, a)
-
-	var lhsPatterns []*rule.Fact
-	if hintErr == nil {
-		lhsPatterns = make([]*rule.Fact, len(r.LHS))
-		for i, f := range r.LHS {
-			lhsPatterns[i] = f.Subst(hintBinding)
-		}
-	} else {
-		lhsPatterns = r.LHS
-	}
-
-	for _, b := range conflictSetFactsForConfig(c, lhsPatterns).Values() {
-		var hb *term.Binding
-		if hintErr == nil {
-			hb = hintBinding.Extend(b)
-		} else {
-			instHints := term.Terms(rawHints).Subst(b)
-			u, err := getUniqueBinding(instHints, a)
-			if err != nil {
-				continue
-			}
-			hb = b.Extend(u)
-		}
-
-		log.Infof("hint rule %s is applicable\n  binding: %s", r.Name, hb)
-
-		d, hintActs, err := c.ApplyRule(r, hb)
+		d, acts, err := c.ApplyRule(r, bt)
 		if err != nil {
-			if errors.Is(err, ErrRestrictionViolated) {
-				log.Infof("hint rule %s not applicable due to restriction: %v", r.Name, err)
+			if m.recordLocalFailure(r, err) {
+				log.Infof("rule %s not applicable: %v", r.Name, err)
 				continue
 			}
 			return nil, err
 		}
+		log.Infof("rule %s is applicable\n  binding: %s", r.Name, bt)
 
-		// After applying the hint rule, we have to consume the event again with a trigger rule.
-		g := a.Subst(hb)
-		gKey, err := ruleKeyForTerm(g)
-		if err != nil {
-			return nil, fmt.Errorf("invalid event after accepting hint: %w", err)
-		}
-
-		D, applied, err := m.handleTriggerPaths(d, g, gKey, true)
+		// The epsilon step follows the transition.
+		next, err := m.handleEpsilon(r, bt, d, acts)
 		if err != nil {
 			return nil, err
 		}
-
-		if len(D) == 0 {
-			// A triggered rule consumed the event, but the epsilon step
-			// after it ended every branch. Only this hint candidate ends.
-			// Its actions are not published.
-			if applied {
-				continue
-			}
-			return nil, fmt.Errorf("%w after accepting hint %s", ErrNoApplicableRule, g)
-		}
-
-		for _, t := range D {
-			// Concatenate hint actions and downstream trigger actions.
-			// concatActions allocates only when both sides are non-empty,
-			// so the common single-source case stays alloc-free and we
-			// avoid aliasing hintActs across iterations.
-			C = append(C, RuleApplication{rule: r, binding: hb, config: t.config, actions: concatActions(hintActs, t.actions)})
-		}
+		C = append(C, next...)
 	}
 
 	return C, nil
+}
+
+// handleHints returns the applications of the hint rule of entry that
+// consume the event in the configuration.
+// Every hint binding, together with a premise
+// substitution, is an alternative of its own: the hinted start is applied
+// under it, and every rule with a single trigger that consumes the event in the
+// hinted state continues it. An alternative without such a continuation
+// is a dead hint. It gives no application, and its actions are not
+// published.
+func (m *Monitor) handleHints(config *Config, event term.Term, entry ruleEntry) ([]RuleApplication, error) {
+	hintRule := entry.rule
+	log.Tracef("handleHints(%s, %s, %s)\n\n", config, event, hintRule.Name)
+
+	if !canMatchLHS(config, m.requirements[hintRule]) {
+		return nil, nil
+	}
+	var applications []RuleApplication
+
+	for _, hintBinding := range m.hintBindings(config, event, entry) {
+		log.Infof("hint rule %s is applicable\n  binding: %s", hintRule.Name, hintBinding)
+
+		hintConfig, hintActions, err := config.ApplyRule(hintRule, hintBinding)
+		if err != nil {
+			if m.recordLocalFailure(hintRule, err) {
+				log.Infof("hint rule %s not applicable: %v", hintRule.Name, err)
+				continue
+			}
+			return nil, err
+		}
+
+		// Each hint binding attempts its own trigger continuations.
+		continuationEvent := event.Subst(hintBinding)
+		continuationKey, err := ruleKeyForTerm(continuationEvent)
+		if err != nil {
+			return nil, fmt.Errorf("invalid event after accepting hint: %w", err)
+		}
+		continuations, err := m.handleTriggerPaths(hintConfig, continuationEvent, continuationKey, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(continuations) == 0 {
+			m.recordFailure(FailureDeadHint, hintRule.Name, "no continuation consumes the event after accepting hint", nil)
+			continue
+		}
+
+		for _, continuation := range continuations {
+			// Concatenate hint actions and downstream trigger actions.
+			// concatActions allocates only when both sides are non-empty,
+			// so the common single-source case stays alloc-free and we
+			// avoid aliasing hintActions across iterations.
+			applications = append(applications, RuleApplication{rule: hintRule, binding: hintBinding, config: continuation.config, actions: concatActions(hintActions, continuation.actions)})
+		}
+	}
+
+	return applications, nil
+}
+
+// hintBindings returns the distinct bindings under which a hint of the
+// rule r of entry matches a in c, each extended by a premise substitution
+// of r.
+//
+// If the hints that match a as they are agree on one binding, the premises
+// are matched under it. A hint that does not match a may still match once
+// its premise variables are substituted, if its evaluation failed or if
+// its terms allow it. If there is such a hint, every hint is then matched
+// against a again for each premise substitution. Without a binding, or
+// with distinct ones, every hint is matched for each premise substitution.
+// Both ways find the same bindings for one hint, and every distinct
+// binding is kept. Equal bindings of several hints count once.
+func (m *Monitor) hintBindings(c *Config, a term.Term, entry ruleEntry) []*term.Binding {
+	r := entry.rule
+	var direct *term.Binding
+	ambiguous, substituted := false, false
+	for _, hint := range r.Hints() {
+		u, err := a.Unify(hint)
+		if err != nil {
+			substituted = substituted || errors.Is(err, term.ErrEvaluation) || couldMatch(a, hint, entry.lhsVariables)
+			continue
+		}
+		if direct == nil {
+			direct = u
+		} else if !direct.Equal(u) {
+			ambiguous = true
+		}
+	}
+	if direct == nil || ambiguous {
+		return m.hintBindingsPerPremise(c, a, r, nil)
+	}
+
+	lhs := make([]*rule.Fact, len(r.LHS))
+	for i, f := range r.LHS {
+		lhs[i] = f.Subst(direct)
+	}
+	var bindings []*term.Binding
+	for _, b := range conflictSetFactsForConfig(c, lhs).Values() {
+		bindings = append(bindings, direct.Extend(b))
+	}
+	if !substituted {
+		return bindings
+	}
+	return m.hintBindingsPerPremise(c, a, r, bindings)
+}
+
+// hintBindingsPerPremise appends to bindings the distinct bindings under
+// which a hint of r matches a after a premise substitution, in the order
+// of the substitutions and then of the hints.
+func (m *Monitor) hintBindingsPerPremise(c *Config, a term.Term, r *rule.Rule, bindings []*term.Binding) []*term.Binding {
+	seen := newBindingSet()
+	for _, hb := range bindings {
+		seen.Add(hb)
+	}
+	for _, b := range conflictSetFactsForConfig(c, r.LHS).Values() {
+		for _, hint := range r.Hints() {
+			u, err := a.Unify(hint.Subst(b))
+			if err != nil {
+				continue
+			}
+			if hb := b.Extend(u); seen.Add(hb) {
+				bindings = append(bindings, hb)
+			}
+		}
+	}
+	return bindings
 }
 
 // handleEpsilon performs the epsilon step after a transition: it applies
@@ -828,10 +881,11 @@ func (m *Monitor) handleHints(c *Config, a term.Term, r *rule.Rule) ([]RuleAppli
 //
 // Every successful application is its own successor. Successors with the
 // same configuration and actions are merged. A candidate whose
-// restriction fails is skipped, so if every candidate fails there is no
-// successor and only this branch ends. Without a candidate, c is the only
-// successor. An epsilon candidate left in a successor is an
-// ErrEpsilonDepth error.
+// restriction or evaluation fails is skipped, so if every candidate fails
+// there is no successor and only this branch ends. Without a candidate, c
+// is the only successor. A successor in which an epsilon candidate is
+// left is pruned on its own. The error result is reserved for broken
+// invariants.
 //
 // It returns one application of the transition's rule r under b per
 // successor. Its actions are acts followed by those of the epsilon rule,
@@ -842,6 +896,7 @@ func (m *Monitor) handleEpsilon(r *rule.Rule, b *term.Binding, c *Config, acts [
 
 	candidates := false
 	var successors []RuleApplication
+	var epsilons []*rule.Rule
 	for _, e := range m.epsilonRules {
 		if !canMatchLHS(c, m.requirements[e]) {
 			continue
@@ -852,8 +907,8 @@ func (m *Monitor) handleEpsilon(r *rule.Rule, b *term.Binding, c *Config, acts [
 
 			d, eActs, err := c.ApplyRule(e, eb)
 			if err != nil {
-				if errors.Is(err, ErrRestrictionViolated) {
-					log.Infof("epsilon rule %s not applicable due to restriction: %v", e.Name, err)
+				if m.recordLocalFailure(e, err) {
+					log.Infof("epsilon rule %s not applicable: %v", e.Name, err)
 					continue
 				}
 				return nil, err
@@ -865,6 +920,7 @@ func (m *Monitor) handleEpsilon(r *rule.Rule, b *term.Binding, c *Config, acts [
 				})
 			}) {
 				successors = append(successors, RuleApplication{rule: r, binding: b, config: d, actions: actions})
+				epsilons = append(epsilons, e)
 			}
 		}
 	}
@@ -872,12 +928,15 @@ func (m *Monitor) handleEpsilon(r *rule.Rule, b *term.Binding, c *Config, acts [
 	if !candidates {
 		return []RuleApplication{{rule: r, binding: b, config: c, actions: acts}}, nil
 	}
-	for _, successor := range successors {
+	valid := successors[:0]
+	for i, successor := range successors {
 		if err := m.checkEpsilonDepth(successor.config); err != nil {
-			return nil, err
+			m.recordLocalFailure(epsilons[i], err)
+			continue
 		}
+		valid = append(valid, successor)
 	}
-	return successors, nil
+	return valid, nil
 }
 
 // checkEpsilonDepth returns an ErrEpsilonDepth error if an epsilon rule
@@ -930,6 +989,9 @@ type ViolationInfo struct {
 	TimedEvent *TimedEvent
 	EventIndex int
 	Stats      StatsSummary
+	// Failures reports the failed candidates and branches of the rejected
+	// event and of earlier events.
+	Failures FailureReport
 }
 
 // StreamResult is the outcome of processing an event stream: a violation,
@@ -1118,6 +1180,7 @@ func (m *Monitor) ProcessEvents(
 						TimedEvent: cloneTimedEvent(event),
 						EventIndex: len(m.stats.LatenciesReceived),
 						Stats:      m.stats.Summary(time.Now()),
+						Failures:   m.failures.report(),
 					}
 				} else {
 					result.Err = fmt.Errorf("process event %s: %w", event.Event, err)
@@ -1159,9 +1222,15 @@ func (m *Monitor) ProcessEvents(
 	}
 }
 
+// logFinalConfigs logs the live configurations or, after a rejected event,
+// those from which the event was rejected.
 func (m *Monitor) logFinalConfigs() {
-	log.Warnf("\nfinal configurations (%d)\n", m.configs.Size())
-	for _, c := range m.configs.Values() {
+	configs := m.configs
+	if configs.Empty() && m.rejected != nil {
+		configs = m.rejected
+	}
+	log.Warnf("\nfinal configurations (%d)\n", configs.Size())
+	for _, c := range configs.Values() {
 		for _, f := range c.Facts() {
 			log.Warnf("  %s\n", f.Name)
 		}

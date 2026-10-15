@@ -262,3 +262,25 @@ func TestRewriteBoundHeadsAndNestedBuiltins(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidBoundRewriteHeadPreservesValidSibling(t *testing.T) {
+	for _, head := range []term.Term{term.NewConstant([]byte{1, 2}), term.NewFunction("byte", []term.Term{term.NewConstant([]byte{1, 2})})} {
+		event := monitor.TimedEvent{Event: term.NewFunction(term.PairFunctionName, []term.Term{term.NewFunction("raw", []term.Term{head}), rewriteTestEmpty})}
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rewrite := writeMonitorSpec(t, `rule Bad [trigger=[<raw(e), r>]]: [] --[PPEvent(<e, r>)]-> []
+rule Good [trigger=[<raw(e), r>]]: [] --[PPEvent(<valid(), r>)]-> []`)
+		core := writeMonitorSpec(t, `rule Main [trigger=[<valid(), r>]]: [] --> []`)
+		config := MonitorConfig{In: writeMonitorInput(t, append(line, '\n')), RewriteWith: rewrite}
+		command := monitorTestCommand()
+		if err := config.RunE(command, []string{core}); err != nil {
+			t.Fatalf("valid sibling rejected for %s: %v", head, err)
+		}
+		output := command.OutOrStdout().(*bytes.Buffer).String()
+		if !strings.Contains(output, "1: <valid(), <>>") || strings.Contains(output, "2:") {
+			t.Fatalf("consumed output = %s", output)
+		}
+	}
+}

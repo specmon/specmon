@@ -204,13 +204,13 @@ specifications are loaded before any event is processed.
 ### Violation reactions
 
 `--on-violation` runs only when the main monitor reports a genuine
-specification violation. It does not run for malformed input, transport
-failures, rewrite failures, or cancellation, nor when an action or conclusion
-of an applied rule cannot be evaluated. A trigger, hint or premise whose
-evaluation fails does not match; if no other rule accepts the event, that is a
-violation. The hook names one executable or script, as a path or as a name
-without a slash that is looked up in `PATH`. SpecMon does not invoke a shell or
-parse arguments from it, so scripts need a valid shebang.
+specification violation: an event after which no branch of the main monitor
+survives, whatever ended the branches (see [Failure reasons](#failure-reasons)).
+It does not run for malformed input, transport failures, an event that no
+rewrite rule accepts, broken internal invariants, or cancellation. The hook
+names one executable or script, as a path or as a name without a slash that is
+looked up in `PATH`. SpecMon does not invoke a shell or parse arguments from
+it, so scripts need a valid shebang.
 
 The hook receives one newline terminated JSON object on stdin. Both hook stdout
 and hook stderr are forwarded to SpecMon stderr. Payload schema version 1 is:
@@ -248,6 +248,22 @@ and hook stderr are forwarded to SpecMon stderr. Payload schema version 1 is:
     "avg_processing_time": 5,
     "med_latency_received": 20,
     "med_latency_processed": 25
+  },
+  "failures": {
+    "final": [
+      {
+        "monitor": "core",
+        "event": 2,
+        "rule": "Check",
+        "category": "restriction",
+        "message": "restriction violated: Eq('1', '2')",
+        "branch": "5b0e2c3a9f1d4e77"
+      }
+    ],
+    "earlier": [],
+    "counts": {
+      "restriction": 1
+    }
   }
 }
 ```
@@ -258,7 +274,8 @@ consumed but not emitted by the rewriter do not count. `time` is the original
 event timestamp in nanoseconds. Every duration in `stats` is also measured in
 nanoseconds. Optional `role`, `pid`, and `rewrite_with` fields are omitted when
 they are not configured. `event_term` provides a stable readable form of the
-event alongside the version 2 typed JSON event representation.
+event alongside the version 2 typed JSON event representation. `failures`
+reports why branches ended. See [Failure reasons](#failure-reasons).
 
 The hook environment inherits the SpecMon environment and replaces these
 values for the current violation:
@@ -290,6 +307,65 @@ print `signal received, exiting` on stderr, and exit with status 0; `monitor`
 also prints its statistics line. A second signal ends SpecMon at once, also
 while it waits for a violation hook or for a blocked output; the PID is then not
 terminated and no error line is printed.
+
+### Failure reasons
+
+SpecMon records why each rule candidate and branch ended, whether or not other
+branches survived. When an event is rejected, it prints the records on stderr
+after the hook output and before the error: every record of the rejected event,
+then the most recent records of earlier events as context, and the number of
+records per category. The earlier records and the counts cover the whole
+invocation: the pre-trace and the input, and with `--rewrite-with` both
+monitors. The same report is the `failures` field of the hook payload. A rejection by the rewriter runs no hook, so its
+report appears on stderr only. So does that of `specmon rewrite`.
+
+Failure categories can be nonzero together. Counts are cumulative across
+attempted candidates, including discarded alternatives and both monitors of
+an integrated pipeline. Zero categories are omitted from the human summary
+and JSON counts object. Treat missing JSON counts as zero. Hint continuation
+records and counts are per attempted hint binding, so identical restriction
+or dead-hint records can legitimately repeat.
+
+A record has these fields:
+
+- `monitor`: `rewrite` for the rewriter of `--rewrite-with` or of
+  `specmon rewrite`, `core` for the monitor of the protocol model.
+- `event`: the index of the event, from 1, among all events that the monitor
+  received. For the core monitor it is counted like the payload's
+  `event_index`, so it includes the pre-trace and, with `--rewrite-with`,
+  counts the rewritten events. The field `rewrite.raw_event` is then the index of the
+  raw event among the raw events.
+- `rewrite`: for a record of the core monitor with `--rewrite-with`, the raw
+  event (`raw_event`), the rewrite alternative of that raw event
+  (`alternative`, from 1) and the position of the rewritten event among the
+  events it emits (`position`, from 1). Each alternative of the rejected raw
+  event keeps its records. The alternatives of one raw event count their
+  events from the events consumed before it, so records of different
+  alternatives can have the same `event`. The field `rewrite` tells them apart.
+- `rule`: the rule whose candidate failed. Omitted if no candidate exists.
+- `category`: `no_candidate` (no candidate of any rule consumes the event in
+  the branch), `restriction` (an `Eq` or `Neq` restriction failed),
+  `evaluation` (a term of a candidate that matched the event could not be
+  evaluated), `epsilon_depth` (an epsilon candidate is left after the epsilon
+  step, so the successor is pruned) or `dead_hint` (a hinted start has no
+  continuation that consumes the event).
+- `message`: the reason in words.
+- `branch`: the hash of the configuration in which the event was tried, as 16
+  hexadecimal digits.
+
+The records of the rejected event explain the rejection. Earlier records are
+context. The branches of an event are tried in the order of their
+configuration hashes, so the records come in the same order in every run.
+SpecMon keeps all records of the current event, the 256 most recent records of
+earlier events, and the counts. On stderr, control characters in a message,
+which can come from the trace, are escaped, so that every record is one line.
+
+At a rejection, SpecMon also logs, at the default level `error`, the events
+that each configuration of the rejecting monitor allows: `allowed events in
+configuration N` for a monitor without `--rewrite-with`. With it, `allowed raw
+events in rewrite configuration N` when the rewriter rejects the raw event, and
+`allowed events in core configuration N (raw event R, alternative A, position
+P)` for each rewrite alternative that the core monitor rejects.
 
 ### Rewrite command: `specmon rewrite`
 

@@ -167,7 +167,7 @@ func rewritingRunnerMonitor(t *testing.T) *monitor.Monitor {
 	return m
 }
 
-func TestRunReturnsBitwiseEvaluationErrors(t *testing.T) {
+func TestRunRejectsBitwiseEvaluationFailures(t *testing.T) {
 	t.Parallel()
 
 	event := runnerEvent(runnerInputEventName, term.NewConstant[int64](1))
@@ -190,13 +190,14 @@ func TestRunReturnsBitwiseEvaluationErrors(t *testing.T) {
 		t.Fatalf("NewMonitor: %v", err)
 	}
 
+	// The failed evaluation ends the only candidate: an ordinary violation.
 	reader := &closeTrackingReader{Reader: strings.NewReader(string(runnerEventLine(t, event)))}
 	violation, err := m.Run(context.Background(), reader, nil)
-	if violation != nil {
-		t.Fatalf("Run returned violation %v for an evaluator error", violation)
+	if err != nil || violation == nil || !errors.Is(violation.Err, monitor.ErrNoApplicableRule) {
+		t.Fatalf("Run = (%v, %v), want a violation", violation, err)
 	}
-	if !errors.Is(err, term.ErrEvaluation) || !errors.Is(err, term.ErrInvalidType) {
-		t.Fatalf("Run error = %v, want ErrEvaluation wrapping ErrInvalidType", err)
+	if violation.EventIndex != 1 || !violation.TimedEvent.Event.Equal(event) {
+		t.Fatalf("violation = %+v, want the first event", violation)
 	}
 }
 

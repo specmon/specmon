@@ -19,6 +19,7 @@
 package monitor
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -55,10 +56,10 @@ func (m *Monitor) Rewrite(
 	r io.ReadCloser,
 	onOutput func(*TimedEvent) error,
 ) error {
+	m.site.monitor = FailureMonitorRewrite
 	violation, err := runMonitor(ctx, m, r, true, onOutput, nil, nil)
 	if violation != nil {
-		return fmt.Errorf("rewrite violation at event %d: %w %s",
-			violation.EventIndex, violation.Err, violation.TimedEvent.Event)
+		return fmt.Errorf("rewrite violation at event %d: %w %s", violation.EventIndex, violation.Err, violation.TimedEvent.Event)
 	}
 	return err
 }
@@ -220,6 +221,11 @@ func RunPipeline(
 		_ = r.Close()
 	}()
 
+	// One log keeps the records of both monitors, so that the records of
+	// every alternative of a raw event stay together until it is decided.
+	rewriter.site.monitor = FailureMonitorRewrite
+	rewriter.failures = main.failures
+
 	start := time.Now()
 	if rewriter.stats.StartTime.IsZero() {
 		rewriter.stats.StartTime = start
@@ -227,13 +233,16 @@ func RunPipeline(
 	if main.stats.StartTime.IsZero() {
 		main.stats.StartTime = start
 	}
+	// states are the live pipeline states. After an event without a
+	// surviving branch they are empty, and lastStates, the last states
+	// that were not, remain for the diagnostics.
 	states := initialPipelineStates(rewriter, main)
-	aggregateStates := states
+	lastStates := states
 	defer func() {
 		end := time.Now()
 		rewriter.stats.EndTime = end
 		main.stats.EndTime = end
-		updatePipelineConfigs(rewriter, main, aggregateStates)
+		updatePipelineConfigs(rewriter, main, states, lastStates)
 		rewriter.logFinalConfigs()
 		main.logFinalConfigs()
 	}()
@@ -271,11 +280,16 @@ func RunPipeline(
 			)
 			advance, err := advancePipeline(rewriter, main, states, event)
 			if err != nil {
+				// A rejection on the rewrite side leaves no branch. It is
+				// reported as an error, without a violation.
+				if errors.Is(err, ErrNoApplicableRule) {
+					states = nil
+				}
 				return nil, fmt.Errorf("process event %s: %w", event.Event, err)
 			}
 			states = advance.next
 			if len(advance.next) > 0 {
-				aggregateStates = advance.next
+				lastStates = advance.next
 			}
 			rewriter.stats.LatenciesProcessed = append(
 				rewriter.stats.LatenciesProcessed,
@@ -297,6 +311,7 @@ func RunPipeline(
 					TimedEvent: cloneTimedEvent(advance.failure.event),
 					EventIndex: len(main.stats.LatenciesReceived),
 					Stats:      main.stats.Summary(end),
+					Failures:   main.failures.report(),
 				}, nil
 			}
 		case err := <-terminal:
@@ -337,12 +352,18 @@ type pipelineTransition struct {
 type pipelineFailure struct {
 	event     *TimedEvent
 	processed []term.Term
+	// configs are the core configurations that tried the event, and
+	// position identifies it among the outputs of the raw event.
+	configs  []*Config
+	position RewritePosition
 }
 
 type pipelineAdvance struct {
 	next     []pipelineState
 	consumed []term.Term
-	failure  *pipelineFailure
+	// failure is set when the main monitor rejects every rewrite
+	// alternative.
+	failure *pipelineFailure
 }
 
 type mainAdvance struct {
@@ -369,33 +390,34 @@ func advancePipeline(
 	if err != nil {
 		return pipelineAdvance{}, fmt.Errorf("invalid event: %w", err)
 	}
+	rewriter.beginEvent()
+	// The core monitor counts the rewritten events. Each alternative of
+	// the raw event counts its outputs from the same base.
+	base := main.site.event
+	alternative := 0
 
 	var transitions []pipelineTransition
-	var failed *pipelineFailure
-	rewriteMatched := false
+	var failures []*pipelineFailure
 	for _, state := range states {
 		applications, err := rewriter.processConfigEvent(state.rewrite, event.Event, key)
 		if err != nil {
 			return pipelineAdvance{}, err
 		}
-		if len(applications) == 0 {
-			continue
-		}
-		rewriteMatched = true
-
 		for _, application := range applications {
 			outputs, err := rewriteOutputs(application.actions)
 			if err != nil {
 				return pipelineAdvance{}, err
 			}
-			mainResult, err := advanceMainConfigs(main, state.main, outputs, event.Time)
+			alternative++
+			position := RewritePosition{RawEvent: rewriter.site.event, Alternative: alternative}
+			mainResult, err := advanceMainConfigs(main, state.main, outputs, event.Time, base, position)
 			if err != nil {
 				return pipelineAdvance{}, err
 			}
-			if len(mainResult.configs) == 0 {
-				if mainResult.failure != nil {
-					failed = mainResult.failure
-				}
+			// An alternative whose outputs the core monitor consumed, or
+			// that emitted none, continues. The others failed.
+			if mainResult.failure != nil {
+				failures = append(failures, mainResult.failure)
 				continue
 			}
 			transitions = append(transitions, pipelineTransition{
@@ -408,11 +430,31 @@ func advancePipeline(
 		}
 	}
 
+	// Without a surviving branch, the rewriter rejects the event if none of
+	// its candidates succeeded, and the core monitor otherwise. Every
+	// rewrite alternative gives a transition or a failure, so without
+	// either no rewrite candidate succeeded. The allowed events of the side
+	// that rejects are logged, as a single monitor does, with the rewrite
+	// position of each failed alternative.
 	if len(transitions) == 0 {
-		if !rewriteMatched {
+		if len(failures) == 0 {
+			rewriteConfigs := make([]*Config, len(states))
+			for i, state := range states {
+				rewriteConfigs[i] = state.rewrite
+			}
+			rewriter.logAllowedEvents(rewriteConfigs, func(i int) string {
+				return fmt.Sprintf("allowed raw events in rewrite configuration %d", i)
+			})
 			return pipelineAdvance{}, fmt.Errorf("rewrite violation: %w", ErrNoApplicableRule)
 		}
-		return pipelineAdvance{failure: failed}, nil
+		for _, failure := range failures {
+			main.logAllowedEvents(failure.configs, func(i int) string {
+				return fmt.Sprintf("allowed events in core configuration %d (raw event %d, alternative %d, position %d)",
+					i, failure.position.RawEvent, failure.position.Alternative, failure.position.Position)
+			})
+		}
+		// As before, the violation names the failure of the last alternative.
+		return pipelineAdvance{failure: failures[len(failures)-1]}, nil
 	}
 
 	transitions = dedupePipelineTransitions(transitions)
@@ -431,33 +473,56 @@ func advancePipeline(
 			consumed = append(consumed, output)
 		}
 	}
+	main.site.event = base + len(consumed)
+	// The next event tries the branches in the order of their rewrite
+	// configuration hashes, as a single monitor tries its configurations,
+	// and then of the hashes of their core configurations.
+	slices.SortFunc(next, func(a, b pipelineState) int {
+		if c := cmp.Compare(a.rewrite.Hash(), b.rewrite.Hash()); c != 0 {
+			return c
+		}
+		return slices.CompareFunc(a.main, b.main, func(x, y *Config) int { return cmp.Compare(x.Hash(), y.Hash()) })
+	})
 
 	return pipelineAdvance{next: next, consumed: consumed}, nil
 }
 
+// advanceMainConfigs lets the core monitor consume the outputs of one
+// rewrite alternative. Its records count the outputs from base and carry
+// position with the index of each output.
 func advanceMainConfigs(
 	main *Monitor,
 	configs []*Config,
 	outputs []*term.Function,
 	eventTime int64,
+	base int,
+	position RewritePosition,
 ) (mainAdvance, error) {
 	current := configs
 	for i, output := range outputs {
-		if err := checkRewriteEvent(output); err != nil {
-			return mainAdvance{}, fmt.Errorf("invalid rewritten event: %w", err)
-		}
-		key, err := ruleKeyForTerm(output)
-		if err != nil {
-			return mainAdvance{}, fmt.Errorf("invalid rewritten event: %w", err)
-		}
+		main.site.event = base + i + 1
+		main.site.rewrite = position
+		main.site.rewrite.Position = i + 1
 		next := data.NewHashSet[*Config]()
-		for _, config := range current {
-			applications, err := main.processConfigEvent(config, output, key)
-			if err != nil {
-				return mainAdvance{}, err
+		// Invalid emitted heads end only this rewrite alternative.
+		key, err := ruleKeyForTerm(output)
+		if err == nil {
+			err = checkRewriteEvent(output)
+		}
+		if err != nil {
+			for _, config := range current {
+				main.site.branch = config
+				main.recordFailure(FailureNoCandidate, "", fmt.Sprintf("no rule candidate consumes the event: %v", err), nil)
 			}
-			for _, application := range applications {
-				next.Add(application.config)
+		} else {
+			for _, config := range current {
+				applications, err := main.processConfigEvent(config, output, key)
+				if err != nil {
+					return mainAdvance{}, err
+				}
+				for _, application := range applications {
+					next.Add(application.config)
+				}
 			}
 		}
 		if next.Empty() {
@@ -469,6 +534,8 @@ func advanceMainConfigs(
 				failure: &pipelineFailure{
 					event:     &TimedEvent{Time: eventTime, Event: output},
 					processed: processed,
+					configs:   current,
+					position:  main.site.rewrite,
 				},
 			}, nil
 		}
@@ -509,11 +576,12 @@ func rewriteOutputs(actions []*rule.Fact) ([]*term.Function, error) {
 		if rewriteTerm == nil {
 			continue
 		}
-		output, err := term.AsFunction(rewriteTerm)
-		if err != nil {
-			return nil, fmt.Errorf("rewrite action %s: %w", action, err)
+		// Loading ensures that an output is a pair. Anything else is a
+		// broken invariant.
+		if event, result := term.SplitPair(rewriteTerm); event == nil || result == nil {
+			return nil, fmt.Errorf("rewrite output %s is not a pair <event, result>", rewriteTerm)
 		}
-		outputs = append(outputs, output)
+		outputs = append(outputs, term.Must(term.AsFunction(rewriteTerm)))
 	}
 	return outputs, nil
 }
@@ -551,17 +619,26 @@ func outputsEqual(left, right []*term.Function) bool {
 	return slices.EqualFunc(left, right, func(l, r *term.Function) bool { return term.EqualWithKind(l, r) })
 }
 
-func updatePipelineConfigs(rewriter, main *Monitor, states []pipelineState) {
-	rewriteConfigs := data.NewHashSet[*Config]()
-	mainConfigs := data.NewHashSet[*Config]()
+// updatePipelineConfigs makes the configurations of states live in both
+// monitors. If states is empty because an event was rejected, lastStates
+// are kept for the diagnostics.
+func updatePipelineConfigs(rewriter, main *Monitor, states, lastStates []pipelineState) {
+	rewriter.configs, main.configs = pipelineConfigs(states)
+	if len(states) == 0 && len(lastStates) > 0 {
+		rewriter.rejected, main.rejected = pipelineConfigs(lastStates)
+	}
+}
+
+func pipelineConfigs(states []pipelineState) (rewrite, main *data.HashSet[*Config]) {
+	rewrite = data.NewHashSet[*Config]()
+	main = data.NewHashSet[*Config]()
 	for _, state := range states {
-		rewriteConfigs.Add(state.rewrite)
+		rewrite.Add(state.rewrite)
 		for _, mainConfig := range state.main {
-			mainConfigs.Add(mainConfig)
+			main.Add(mainConfig)
 		}
 	}
-	rewriter.configs = rewriteConfigs
-	main.configs = mainConfigs
+	return rewrite, main
 }
 
 func isExpectedShutdownError(err error) bool {

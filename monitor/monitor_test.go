@@ -815,10 +815,13 @@ func TestProcessEventHandlesInvalidEvaluatedCandidates(t *testing.T) {
 						}
 						return
 					}
-					// A failed evaluation is not a match. With no other
-					// candidate the event is rejected.
+					// The failed evaluation ends only its candidate. With no
+					// other candidate the event is rejected.
 					if !errors.Is(err, monitor.ErrNoApplicableRule) || errors.Is(err, term.ErrEvaluation) {
 						t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule", err)
+					}
+					if configs := mon.Configs(); len(configs) != 0 {
+						t.Fatalf("configurations after the rejection = %v, want none", configs)
 					}
 				})
 			}
@@ -826,7 +829,7 @@ func TestProcessEventHandlesInvalidEvaluatedCandidates(t *testing.T) {
 	}
 }
 
-func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
+func TestProcessEventRejectsEpsilonEvaluationFailures(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -862,14 +865,13 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMonitor: %v", err)
 	}
+	// The failed epsilon candidate ends its branch, the only one.
 	_, err = mon.ProcessEvent(event)
-	if !errors.Is(err, term.ErrEvaluation) {
-		t.Fatalf("ProcessEvent error = %v, want ErrEvaluation", err)
+	if !errors.Is(err, monitor.ErrNoApplicableRule) || errors.Is(err, term.ErrEvaluation) {
+		t.Fatalf("ProcessEvent error = %v, want ErrNoApplicableRule", err)
 	}
-	for _, config := range mon.Configs() {
-		if config.CountByName(invalidFactName) != 0 {
-			t.Fatalf("ProcessEvent published an invalid epsilon result: %v", config.Facts())
-		}
+	if configs := mon.Configs(); len(configs) != 0 {
+		t.Fatalf("ProcessEvent left configurations live after the rejection: %v", configs)
 	}
 }
 

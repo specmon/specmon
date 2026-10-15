@@ -96,6 +96,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(cmd.ErrOrStderr(), "signal received, exiting")
 			return nil
 		}
+		writeRejectionReport(cmd.ErrOrStderr(), runErr, m)
 		return fmt.Errorf("rewrite events: %w", runErr)
 	}
 	if closeErr != nil {

@@ -53,19 +53,20 @@ const (
 )
 
 type violationHookPayload struct {
-	SchemaVersion string               `json:"schema_version"`
-	Kind          string               `json:"kind"`
-	ErrorKind     string               `json:"error_kind"`
-	Error         string               `json:"error"`
-	EventIndex    int                  `json:"event_index"`
-	Time          *int64               `json:"time,omitempty"`
-	Event         *term.Function       `json:"event,omitempty"`
-	EventTerm     string               `json:"event_term,omitempty"`
-	SpecPath      string               `json:"spec_path"`
-	Role          string               `json:"role,omitempty"`
-	PID           int                  `json:"pid,omitempty"`
-	RewriteWith   string               `json:"rewrite_with,omitempty"`
-	Stats         monitor.StatsSummary `json:"stats"`
+	SchemaVersion string                `json:"schema_version"`
+	Kind          string                `json:"kind"`
+	ErrorKind     string                `json:"error_kind"`
+	Error         string                `json:"error"`
+	EventIndex    int                   `json:"event_index"`
+	Time          *int64                `json:"time,omitempty"`
+	Event         *term.Function        `json:"event,omitempty"`
+	EventTerm     string                `json:"event_term,omitempty"`
+	SpecPath      string                `json:"spec_path"`
+	Role          string                `json:"role,omitempty"`
+	PID           int                   `json:"pid,omitempty"`
+	RewriteWith   string                `json:"rewrite_with,omitempty"`
+	Stats         monitor.StatsSummary  `json:"stats"`
+	Failures      monitor.FailureReport `json:"failures"`
 }
 
 func newViolationHookPayload(
@@ -89,6 +90,7 @@ func newViolationHookPayload(
 		PID:           pid,
 		RewriteWith:   rewriteWith,
 		Stats:         violation.Stats,
+		Failures:      violation.Failures,
 	}
 }
 
