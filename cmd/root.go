@@ -70,6 +70,8 @@ func (c *RootConfig) RunE(ctx context.Context) error {
 		return err
 	}
 
+	writeLoadWarnings(os.Stderr, rules.Executable)
+
 	if c.Quiet {
 		return nil
 	}

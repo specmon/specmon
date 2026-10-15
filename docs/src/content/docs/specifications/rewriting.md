@@ -89,7 +89,7 @@ rule MapCall [trigger=[<foo_Enter(tid, x), <>>,
 ```
 
 - Triggers match incoming events
-- `PPEvent(<f(x), y>)` emits the rewritten event
+- `PPEvent(<f(x), y>)` emits the rewritten event. The argument of `PPEvent` must be written as a pair `<event, result>`, otherwise the rewrite model is rejected when it is loaded ([Model Requirements](/specifications/model-requirements/))
 
 Some instrumentation emits separate `Enter` and `Leave` events for a call. This is common when arguments may be overwritten after the call returns. The `Enter` event captures the input arguments, and the `Leave` event captures the return value so the rewrite rule can bind both safely.
 

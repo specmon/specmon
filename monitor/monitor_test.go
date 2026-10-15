@@ -20,6 +20,7 @@ package monitor_test
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		},
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("hintOut", []term.Term{term.NewVariable("x")}),
+				emittedEvent(term.NewFunction("hintOut", []term.Term{term.NewVariable("x")})),
 			}, rule.LinearFact),
 		},
 		Attrs: map[string]rule.Attribute{
@@ -96,7 +97,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		RHS: []*rule.Fact{},
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("t1", []term.Term{term.NewVariable("x")}),
+				emittedEvent(term.NewFunction("t1", []term.Term{term.NewVariable("x")})),
 			}, rule.LinearFact),
 		},
 		Attrs: map[string]rule.Attribute{
@@ -120,7 +121,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		RHS: []*rule.Fact{},
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("t2", []term.Term{term.NewVariable("x")}),
+				emittedEvent(term.NewFunction("t2", []term.Term{term.NewVariable("x")})),
 			}, rule.LinearFact),
 		},
 		Attrs: map[string]rule.Attribute{
@@ -175,8 +176,8 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 			continue
 		}
-		fn, err := term.AsFunction(f.Args[0])
-		if err != nil {
+		fn, ok := emittedCall(f.Args[0])
+		if !ok {
 			continue
 		}
 		switch fn.Name {
@@ -218,7 +219,7 @@ func TestMonitorHintTriggerEmptyActionsBothSurvive(t *testing.T) {
 		},
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("hintOut", []term.Term{term.NewVariable("x")}),
+				emittedEvent(term.NewFunction("hintOut", []term.Term{term.NewVariable("x")})),
 			}, rule.LinearFact),
 		},
 		Attrs: map[string]rule.Attribute{
@@ -307,8 +308,8 @@ func TestMonitorHintTriggerEmptyActionsBothSurvive(t *testing.T) {
 			if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 				continue
 			}
-			fn, err := term.AsFunction(f.Args[0])
-			if err != nil {
+			fn, ok := emittedCall(f.Args[0])
+			if !ok {
 				continue
 			}
 			if fn.Name == "hintOut" {
@@ -416,7 +417,7 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 		},
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("triggered", []term.Term{term.NewVariable("ret")}),
+				emittedEvent(term.NewFunction("triggered", []term.Term{term.NewVariable("ret")})),
 			}, rule.LinearFact),
 		},
 		Attrs: map[string]rule.Attribute{
@@ -439,7 +440,7 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 		// No RHS, no trigger, no hint -> epsilon rule.
 		Act: []*rule.Fact{
 			rule.NewFact(rule.RewriteEventName, []term.Term{
-				term.NewFunction("promoted", []term.Term{term.NewVariable("x")}),
+				emittedEvent(term.NewFunction("promoted", []term.Term{term.NewVariable("x")})),
 			}, rule.LinearFact),
 		},
 		// Empty (but non-nil) Attrs so Rule.Subst can populate the
@@ -479,8 +480,8 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 		if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 			continue
 		}
-		fn, err := term.AsFunction(f.Args[0])
-		if err != nil {
+		fn, ok := emittedCall(f.Args[0])
+		if !ok {
 			continue
 		}
 		switch fn.Name {
@@ -756,7 +757,7 @@ func TestProcessEventHandlesInvalidEvaluatedCandidates(t *testing.T) {
 			value,
 		})
 	}
-	invalidArgument := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](1)})
+	invalidArgument := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](math.MaxInt64), term.NewConstant[int64](1)})
 	invalidCandidate := pairEvent(eventFunctionName, invalidArgument)
 	validCandidate := pairEvent(eventFunctionName, term.NewVariable("value"))
 	event := pairEvent(eventFunctionName, term.NewConstant[int64](2))
@@ -847,7 +848,7 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{event}},
 		},
 	}
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](1)})
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](math.MaxInt64), term.NewConstant[int64](1)})
 	epsilonRule := &rule.Rule{
 		Name: epsilonRuleName,
 		LHS:  []*rule.Fact{rule.NewFact(readyFactName, nil, rule.LinearFact)},
@@ -864,9 +865,6 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 	_, err = mon.ProcessEvent(event)
 	if !errors.Is(err, term.ErrEvaluation) {
 		t.Fatalf("ProcessEvent error = %v, want ErrEvaluation", err)
-	}
-	if !errors.Is(err, term.ErrBinaryArity) {
-		t.Fatalf("ProcessEvent error = %v, want wrapped ErrBinaryArity", err)
 	}
 	for _, config := range mon.Configs() {
 		if config.CountByName(invalidFactName) != 0 {
@@ -976,4 +974,19 @@ func TestFinalIntFieldWithoutWidthTakesEightBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// emittedEvent returns the rewrite output <call, <>>.
+func emittedEvent(call *term.Function) term.Term {
+	return term.NewFunction(term.PairFunctionName, []term.Term{call, term.NewFunction(term.PairFunctionName, nil)})
+}
+
+// emittedCall returns the event call of a rewrite output <call, result>.
+func emittedCall(output term.Term) (*term.Function, bool) {
+	pair, err := term.AsFunction(output)
+	if err != nil || pair == nil || pair.Name != term.PairFunctionName || len(pair.Args) != 2 {
+		return nil, false
+	}
+	call, err := term.AsFunction(pair.Args[0])
+	return call, err == nil && call != nil
 }

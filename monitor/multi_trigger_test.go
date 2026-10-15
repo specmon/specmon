@@ -21,6 +21,7 @@ package monitor
 import (
 	"errors"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -1046,7 +1047,7 @@ func TestMultiTriggerReferenceCompletionFailures(t *testing.T) {
 	)
 
 	unit := term.NewFunction(term.PairFunctionName, nil)
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](1)})
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](math.MaxInt64), term.NewConstant[int64](1)})
 	tests := []struct {
 		name      string
 		rhs       []*rule.Fact
@@ -1235,10 +1236,9 @@ func TestMultiTriggerReferenceCandidateEvaluationPriority(t *testing.T) {
 	)
 
 	value := term.NewVariable("priorityEvaluationValue")
-	future := term.NewVariable("priorityEvaluationFuture")
 	one := term.NewConstant[int64](1)
 	two := term.NewConstant[int64](2)
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{future})
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{value, term.NewConstant[int64](math.MaxInt64)})
 	candidate := func(input term.Term) *rule.Fact {
 		return rule.NewFact(candidateFactName, []term.Term{input}, rule.LinearFact)
 	}
@@ -1390,7 +1390,7 @@ func TestHintCandidateEvaluationFailuresDoNotMatch(t *testing.T) {
 	value := term.NewVariable("hintEvaluationValue")
 	one := term.NewConstant[int64](1)
 	two := term.NewConstant[int64](2)
-	invalid := term.NewFunction(term.AddFunctionName, []term.Term{value})
+	invalid := term.NewFunction(term.AddFunctionName, []term.Term{value, term.NewConstant[int64](math.MaxInt64)})
 	event := eventTerm("hintEvaluation", two)
 	direct := triggerRule(
 		"HintEvaluation_0",

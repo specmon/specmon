@@ -368,9 +368,7 @@ func TestNewMonitorChecksEpsilonRules(t *testing.T) {
 			name: "emitted event call",
 			rules: []*rule.Rule{
 				triggerRule("EpsilonTestEmitCall", nil, []*rule.Fact{linearFact(epsilonTestFactB, x)},
-					slices.Concat(
-						emitted(term.NewFunction(term.PairFunctionName, []term.Term{computation, term.NewFunction(term.PairFunctionName, nil)})),
-						emitted(computation)),
+					emitted(term.NewFunction(term.PairFunctionName, []term.Term{computation, term.NewFunction(term.PairFunctionName, nil)})),
 					eventTerm(epsilonTestEventName, x)),
 				consumeB,
 			},

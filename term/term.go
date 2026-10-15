@@ -52,6 +52,7 @@ const (
 	XorFunctionName    = "xor"
 	NotFunctionName    = "not"
 	AddFunctionName    = "add"
+	UnaryArity         = 1
 	BinaryArity        = 2
 	TernaryArity       = 3
 
@@ -1321,7 +1322,7 @@ func Evaluate(t Term) (Term, error) {
 			return nil, ErrBinaryArity
 		}
 	case NotFunctionName:
-		if len(f.Args) != 1 {
+		if len(f.Args) != UnaryArity {
 			return nil, ErrUnaryArity
 		}
 	}
@@ -1574,7 +1575,7 @@ func handleSliceFunction(f *Function, args []Term, modified bool) (Term, error) 
 }
 
 func handleReverseFunction(f *Function, args []Term, modified bool) (Term, error) {
-	if len(args) != 1 {
+	if len(args) != UnaryArity {
 		return nil, ErrUnaryArity
 	}
 
@@ -1660,4 +1661,22 @@ func SplitPair(t Term) (Term, Term) {
 func ContainsComputation(t Term) bool {
 	fn, ok := t.(*Function)
 	return ok && fn != nil && (!ReservedNames.Contains(fn.Name) || slices.ContainsFunc(fn.Args, ContainsComputation))
+}
+
+// builtinArities records fixed arities. Cat and format fields have their
+// own argument rules.
+var builtinArities = map[string]int{
+	AddFunctionName:   BinaryArity,
+	AndFunctionName:   BinaryArity,
+	OrFunctionName:    BinaryArity,
+	XorFunctionName:   BinaryArity,
+	NotFunctionName:   UnaryArity,
+	ReverseFuncName:   UnaryArity,
+	SliceFunctionName: TernaryArity,
+}
+
+// BuiltinArity returns the fixed arity of a built-in, when it has one.
+func BuiltinArity(name string) (int, bool) {
+	arity, ok := builtinArities[name]
+	return arity, ok
 }

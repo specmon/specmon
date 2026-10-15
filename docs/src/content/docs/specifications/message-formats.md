@@ -62,7 +62,7 @@ Format strings are built using three core functions combined with `cat`:
 | `string(data, len)` | UTF-8 string | `string(name, '16')` — 16-char string |
 | `cat(...)` | Concatenate fields | `cat(byte(...), int(...))` |
 
-The length parameter is required for parsing (to know field boundaries) but optional when only constructing messages.
+The length parameter is required for parsing (to know field boundaries) but optional when only constructing messages. A pattern that is matched against an event is parsed. A `byte` or `string` field without a length before the last field can be parsed only if its value is already bound by a premise, while an `int` field without a length takes eight bytes ([Model Requirements](/specifications/model-requirements/)).
 
 ### Fixed-length fields
 

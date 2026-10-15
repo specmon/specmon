@@ -112,6 +112,7 @@ specmon monitor --role client protocol.spthy
 - Prefer automatic decomposition; it produces correct triggers and hints for nested terms.
 - When writing manual triggers, ensure the function names and argument shapes match the runtime events you emit.
 - Use hints when a rule has multiple independent computations to avoid ambiguous interleavings.
+- Every variable of a rule must occur in a premise or in the trigger or hint that selects it. See [Model Requirements](/specifications/model-requirements/) for what SpecMon checks when it loads a model.
 
 ## Next steps
 

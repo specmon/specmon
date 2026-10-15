@@ -595,19 +595,28 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, []*rule.Fact
 	return d, t.Act, nil
 }
 
+// Names of the restriction actions that a rule application checks.
+const (
+	restrictionEq       = "Eq"
+	restrictionEqual    = "Equal"
+	restrictionNeq      = "Neq"
+	restrictionNotEqual = "NotEqual"
+	restrictionUnequal  = "Unequal"
+)
+
 // restrSatisfied checks the restriction actions of trace. A violated
 // restriction is ErrRestrictionViolated; a malformed one is another error.
 func restrSatisfied(trace []*rule.Fact) error {
 	for _, t := range trace {
 		switch t.Name {
-		case "Eq", "Equal":
+		case restrictionEq, restrictionEqual:
 			if len(t.Args) != 2 {
 				return fmt.Errorf("rule not applied: event restriction: %s must have two arguments", t.Name)
 			}
 			if !t.Args[0].Equal(t.Args[1]) {
 				return fmt.Errorf("%w: %s", ErrRestrictionViolated, t)
 			}
-		case "Neq", "NotEqual", "Unequal":
+		case restrictionNeq, restrictionNotEqual, restrictionUnequal:
 			if len(t.Args) != 2 {
 				return fmt.Errorf("rule not applied: event restriction: %s must have two arguments", t.Name)
 			}

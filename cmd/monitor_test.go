@@ -412,3 +412,81 @@ rule After [trigger=[<after(a,b,c), <>>]]: [Final(a,b,c)] --> []`
 		})
 	}
 }
+
+// TestMonitorPrintsLoadWarnings checks that the warnings of admission are
+// printed on stderr at the default log level, for the main and the rewrite
+// model, and that the model is still monitored.
+func TestMonitorPrintsLoadWarnings(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "warning.spthy")
+	spec := `theory Warning
+begin
+
+rule Dead [trigger=[<monitorTestEvent(), reverse(x)>]]:
+  [ ] --> [ ]
+
+rule Accept [trigger=[<monitorTestEvent(), r>]]:
+  [ ] --> [ ]
+
+end
+`
+	if err := os.WriteFile(specPath, []byte(spec), 0o600); err != nil {
+		t.Fatalf("write specification: %v", err)
+	}
+	cmd := monitorTestCommand()
+	// The model is also the rewrite model, whose warning follows.
+	config := MonitorConfig{In: writeMonitorInput(t, monitorEventLine(t, monitorTestEventName)), RewriteWith: specPath}
+	if err := config.RunE(cmd, []string{specPath}); err != nil {
+		t.Fatalf("RunE: %v", err)
+	}
+	stderr := cmd.ErrOrStderr().(*bytes.Buffer).String()
+	if warning := "warning: rule Dead: variable x is not bound when matching needs its value"; !strings.HasPrefix(stderr, warning) ||
+		strings.Count(stderr, warning) != 2 {
+		t.Fatalf("stderr = %q, want the warning about rule Dead for both models", stderr)
+	}
+}
+
+func TestInspectionPrintsWarningsEvenWhenQuiet(t *testing.T) {
+	// Eq has the wrong arity. Inspection must still print warnings without
+	// applying the monitor's admission checks.
+	path := writeMonitorSpec(t, `rule Dead [trigger=[<raw(), reverse(x)>]]: [] --[Eq('0')]-> []`)
+	for _, quiet := range []bool{false, true} {
+		t.Run(fmt.Sprint(quiet), func(t *testing.T) {
+			stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stderr.Close()
+			stdout, err := os.CreateTemp(t.TempDir(), "stdout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdout.Close()
+			previousErr, previousOut := os.Stderr, os.Stdout
+			os.Stderr, os.Stdout = stderr, stdout
+			defer func() { os.Stderr, os.Stdout = previousErr, previousOut }()
+			config := DefaultRootConfig()
+			config.SpecPath = path
+			config.Quiet = quiet
+			if err := config.RunE(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			warning, err := os.ReadFile(stderr.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(warning), "warning: rule Dead: variable x is not bound") {
+				t.Fatalf("stderr = %s", warning)
+			}
+			display, err := os.ReadFile(stdout.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if quiet && len(display) != 0 {
+				t.Fatalf("quiet display = %s", display)
+			}
+			if !quiet && !strings.Contains(string(display), "Dead") {
+				t.Fatalf("display = %s", display)
+			}
+		})
+	}
+}

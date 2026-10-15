@@ -63,6 +63,7 @@ func (r *RewriteConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
+	writeLoadWarnings(cmd.ErrOrStderr(), rules.Executable)
 
 	outFile, err := getOutputFile(r.Out)
 	if err != nil {

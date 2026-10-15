@@ -92,7 +92,7 @@ func (f hintTestFamily) rules() []*rule.Rule {
 	for i, check := range f.checks {
 		rhs := []*rule.Fact{fact(hintTestOut, x)}
 		if f.invalidEnd {
-			rhs = []*rule.Fact{fact(hintTestOut, term.NewFunction(term.AddFunctionName, []term.Term{x}))}
+			rhs = []*rule.Fact{fact(hintTestOut, term.NewFunction(term.AddFunctionName, []term.Term{x, term.NewConstant("text")}))}
 		}
 		rules = append(rules, epsilonRule("HintTestEnd"+f.suffix+string(rune('A'+i)),
 			[]*rule.Fact{fact(hintTestDone, x)}, rhs, []*rule.Fact{equalAction(x, check)}))

@@ -23,10 +23,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	"github.com/specmon/specmon/monitor"
+	"github.com/specmon/specmon/rule"
 	"github.com/specmon/specmon/term"
 	"github.com/specmon/specmon/utils"
 	"github.com/spf13/cobra"
@@ -88,6 +90,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create monitor: %w", err)
 	}
+	writeLoadWarnings(cmd.ErrOrStderr(), rules.Executable)
 
 	// Batch queued events, but publish them before the runner waits for input.
 	out := bufio.NewWriter(cmd.OutOrStdout())
@@ -121,6 +124,7 @@ func (r *MonitorConfig) RunE(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("cannot create rewrite monitor: %w", err)
 		}
+		writeLoadWarnings(cmd.ErrOrStderr(), rewriteRules.Parsed)
 	}
 
 	if r.PreTrace != "" {
@@ -219,4 +223,12 @@ func NewMonitorCmd() *cobra.Command {
 	addFlagsFromStruct(cmd, &monitorConfig)
 
 	return cmd
+}
+
+// writeLoadWarnings writes what loading finds about rules without
+// rejecting them, whatever the log level.
+func writeLoadWarnings(w io.Writer, rules []*rule.Rule) {
+	for _, warning := range monitor.Warnings(rules) {
+		fmt.Fprintf(w, "warning: %s\n", warning)
+	}
 }

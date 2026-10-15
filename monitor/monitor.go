@@ -1235,15 +1235,12 @@ func rewriteOutputSequence(event term.Term, applications []RuleApplication) ([]*
 // CheckWellformedness checks if the rules are well-formed.
 func checkWellformedness(rules []*rule.Rule) error {
 	for _, r := range rules {
-		for _, action := range r.Act {
-			call, _ := term.SplitPair(action.RewriteTerm())
-			if fn, ok := call.(*term.Function); ok && fn != nil && forbiddenRewriteHead(fn.Name) {
-				return fmt.Errorf("rule %s: built-in %s cannot name a rewritten event", r.Name, fn.Name)
-			}
-		}
 		// A hint rule must have a non-empty LHS.
 		if r.HasHints() && len(r.LHS) == 0 {
 			return fmt.Errorf("hint rule %s has empty LHS", r.Name)
+		}
+		if err := checkRuleAdmission(r); err != nil {
+			return err
 		}
 	}
 

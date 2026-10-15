@@ -52,6 +52,7 @@ export default defineConfig({
 						{ label: 'Creating Unified Models', slug: 'specifications/unified-models' },
 						{ label: 'Encoding Message Formats', slug: 'specifications/message-formats' },
 						{ label: 'Event Rewriting', slug: 'specifications/rewriting' },
+						{ label: 'Model Requirements', slug: 'specifications/model-requirements' },
 					],
 				},
 				{
