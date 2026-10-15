@@ -281,3 +281,88 @@ func BenchmarkConflictSetFactsForConfigLargePersistentBucket(b *testing.B) {
 		}
 	}
 }
+
+// TestPremiseCandidatesMatchPremisesFirst checks that narrowing the
+// premises by an event's values gives the bindings of matching the premises
+// alone, restricted to those under which the trigger matches the event: in
+// the same order, with each shared variable bound by the same fact, also for
+// a fact that is not evaluated yet. Each premise is narrowed by its own
+// values, so premises of one name give no more bindings than they allow.
+func TestPremiseCandidatesMatchPremisesFirst(t *testing.T) {
+	t.Parallel()
+
+	x, y, z := term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("z")
+	str := func(s string) term.Term { return term.NewConstant(s) }
+	use := func(v term.Term) term.Term { return eventTerm("use", v) }
+	matches := func(r *rule.Rule, event term.Term, candidates *bindingSet) []string {
+		var got []string
+		for _, b := range candidates.Values() {
+			if _, err := event.Unify(r.Triggers()[0].Subst(b)); err == nil {
+				got = append(got, b.String())
+			}
+		}
+		return got
+	}
+	sameName := make([]*rule.Fact, 8)
+	sameNameFacts := make([]*rule.Fact, 8)
+	sameNameVars := make([]term.Term, 8)
+	sameNameValues := make([]term.Term, 8)
+	for i := range sameName {
+		sameNameVars[i], sameNameValues[i] = term.NewVariable("x"+strconv.Itoa(i)), failureInt(int64(i))
+		sameName[i], sameNameFacts[i] = linearFact("P", sameNameVars[i]), linearFact("P", sameNameValues[i])
+	}
+
+	for _, test := range []struct {
+		name    string
+		facts   []*rule.Fact
+		body    []*rule.Fact
+		trigger term.Term
+		event   term.Term
+		// most is the most bindings that the narrowed premises may give.
+		most int
+	}{
+		{
+			name:  "fact of a shared variable",
+			facts: []*rule.Fact{linearFact("P", str("ab")), linearFact("P", str("zz")), linearFact("Q", term.NewConstant([]byte("ab")))},
+			body:  []*rule.Fact{linearFact("P", x), linearFact("Q", x)}, trigger: use(x), event: use(term.NewConstant([]byte("ab"))), most: 1,
+		},
+		{
+			name: "order",
+			facts: []*rule.Fact{
+				linearFact("P", str("chosen"), str("a")), linearFact("P", str("chosen"), str("b")), linearFact("P", str("other"), str("c")),
+				linearFact("Q", str("1")), linearFact("Q", str("2")),
+			},
+			body: []*rule.Fact{linearFact("P", x, y), linearFact("Q", z)}, trigger: use(x), event: use(str("chosen")), most: 4,
+		},
+		{
+			name:  "fact not evaluated yet",
+			facts: []*rule.Fact{linearFact("P", term.NewFunction(term.CatFunctionName, []term.Term{term.NewFunction("byte", []term.Term{str("a")})}))},
+			body:  []*rule.Fact{linearFact("P", x)}, trigger: use(x), event: use(str("a")), most: 1,
+		},
+		{
+			name: "premises of one name", facts: sameNameFacts, body: sameName,
+			trigger: use(term.NewFunction("all", sameNameVars)), event: use(term.NewFunction("all", sameNameValues)), most: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			c := NewConfig()
+			for _, f := range test.facts {
+				c.AddFact(f)
+			}
+			r := triggerRule("PremisesFirst", test.body, nil, nil, test.trigger)
+			u, err := test.event.Unify(test.trigger)
+			if err != nil {
+				t.Fatalf("event does not match the trigger: %v", err)
+			}
+			narrowed := premiseCandidates(c, r, u, nil)
+			want := matches(r, test.event, conflictSetFactsForConfig(c, test.body))
+			if got := matches(r, test.event, narrowed); !slices.Equal(got, want) || len(want) == 0 {
+				t.Fatalf("narrowed bindings = %v, want %v", got, want)
+			}
+			if narrowed.Size() > test.most {
+				t.Fatalf("narrowed premises gave %d bindings, want at most %d", narrowed.Size(), test.most)
+			}
+		})
+	}
+}

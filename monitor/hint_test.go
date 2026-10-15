@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/specmon/specmon/rule"
@@ -767,6 +768,90 @@ func TestRunPipelineKeepsHintAlternativesPaired(t *testing.T) {
 				t.Fatalf("rewrite configurations = %v, want the branch paired with the accepted output", configs)
 			}
 		})
+	}
+}
+
+// TestPremiseVariablesTakeTheirFactValues checks that a premise variable
+// takes the value of its fact, as when the premises are matched before the
+// event, whether the rule has one hint, two hints that match with different
+// bindings, or a trigger. The event's value is equal as bytes but may have
+// another type, which the concluded fact and a string field show. A fact
+// whose value has another type than the event's is still tried. A premise
+// that only the event's value could match is refused at load.
+func TestPremiseVariablesTakeTheirFactValues(t *testing.T) {
+	t.Parallel()
+
+	x, y, z, w, v := term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("z"), term.NewVariable("w"), term.NewVariable("v")
+	one := term.NewConstant[int64](1)
+	field := func(kind term.FormatType, args ...term.Term) term.Term { return term.NewFunction(string(kind), args) }
+	cat := func(fields ...term.Term) term.Term { return term.NewFunction(term.CatFunctionName, fields) }
+	call := func(arg term.Term) term.Term { return eventTerm("premiseValueCall", arg) }
+	afterOne := func(last term.Term) term.Term { return cat(field(term.FormatByteType, y, one), last) }
+	annotations := map[string][]term.Term{
+		"one hint": {call(x)}, "other hint": {call(z)}, "both hints": {call(x), call(z)}, "both hints reversed": {call(z), call(x)}, "trigger": nil,
+	}
+	// rules seeds PremiseValueState(v) and concludes PremiseValueDone of
+	// conclusion from it on <premiseValueCall(), x>: directly with a
+	// trigger, or with hints and a continuation.
+	rules := func(premise, conclusion term.Term, hints []term.Term) []*rule.Rule {
+		seed := triggerRule("PremiseValueSeed", nil, []*rule.Fact{linearFact("PremiseValueState", v)}, nil, eventTerm("premiseValueSeed", v))
+		state := []*rule.Fact{linearFact("PremiseValueState", premise)}
+		if hints == nil {
+			return []*rule.Rule{seed, triggerRule("PremiseValueStart", state, []*rule.Fact{linearFact("PremiseValueDone", conclusion)}, nil, call(x))}
+		}
+		hinted := []*rule.Fact{linearFact("PremiseValueHinted", x)}
+		return []*rule.Rule{
+			seed,
+			hintRule("PremiseValueStart", state, []*rule.Fact{linearFact("PremiseValueHinted", conclusion)}, nil, hints...),
+			triggerRule("PremiseValueFollow", hinted, []*rule.Fact{linearFact("PremiseValueDone", x)}, nil, call(w)),
+		}
+	}
+
+	for annotation, hints := range annotations {
+		add := term.NewFunction(term.AddFunctionName, []term.Term{x, one})
+		if _, err := NewMonitor(rules(add, x, hints)); err == nil {
+			t.Errorf("%s: premise PremiseValueState(%s) loaded", annotation, add)
+		}
+	}
+
+	for _, test := range []struct {
+		name                string
+		premise, conclusion term.Term
+		seed                []byte
+		arg                 term.Term
+		want                string
+	}{
+		{"bytes for an int", afterOne(field(term.FormatByteType, x)), x, []byte{1, 2, 0, 0, 0, 0, 0, 0, 0}, term.NewConstant[int64](2), "PremiseValueDone(0x0200000000000000)"},
+		// A string field takes only a string constant.
+		{"bytes for a string", afterOne(field(term.FormatByteType, x)), cat(field(term.FormatStringType, x)), []byte{1, 'a', 'b'}, term.NewConstant("ab"), "rejected"},
+		{"string for bytes", afterOne(field(term.FormatStringType, x)), x, []byte{1, 'a', 'b'}, term.NewConstant([]byte("ab")), "PremiseValueDone('ab')"},
+	} {
+		for annotation, hints := range annotations {
+			t.Run(test.name+"/"+annotation, func(t *testing.T) {
+				t.Parallel()
+				m := newEpsilonTestMonitor(t, rules(test.premise, test.conclusion, hints)...)
+				if _, err := m.ProcessEvent(eventTerm("premiseValueSeed", term.NewConstant(test.seed))); err != nil {
+					t.Fatalf("ProcessEvent(seed): %v", err)
+				}
+				got := "rejected"
+				if _, err := m.ProcessEvent(call(test.arg)); err == nil {
+					var done []string
+					for _, c := range m.Configs() {
+						for _, f := range c.Facts() {
+							if f.Name == "PremiseValueDone" {
+								done = append(done, f.String())
+							}
+						}
+					}
+					got = strings.Join(done, " ")
+				} else if !errors.Is(err, ErrNoApplicableRule) {
+					t.Fatalf("ProcessEvent: %v", err)
+				}
+				if got != test.want {
+					t.Fatalf("outcome %s, want %s", got, test.want)
+				}
+			})
+		}
 	}
 }
 

@@ -55,13 +55,6 @@ var (
 	ErrNondeterministicRewrite = errors.New("nondeterministic rewrite")
 )
 
-type Unifier[T any] interface {
-	fmt.Stringer
-
-	Unify(other T) (*term.Binding, error)
-	Subst(b *term.Binding) T
-}
-
 // ruleKey identifies the predicate-name + arity an event term carries.
 // Splitting trigger and hint rule dispatch by (name, arity) lets us skip
 // the HasTriggers/HasHints filter in the hot loop and avoids visiting
@@ -509,26 +502,12 @@ func (m *Monitor) startPending(
 			continue
 		}
 
-		lhs := entry.rule.LHS
-		if triggerErr == nil {
-			lhs = make([]*rule.Fact, len(entry.rule.LHS))
-			for i, fact := range entry.rule.LHS {
-				lhs[i] = fact.Subst(triggerBinding)
+		for _, lhsBinding := range premiseCandidates(c, entry.rule, triggerBinding, triggerErr).Values() {
+			eventBinding, err := event.Unify(trigger.Subst(lhsBinding))
+			if err != nil {
+				continue
 			}
-		}
-
-		for _, lhsBinding := range conflictSetFactsForConfig(c, lhs).Values() {
-			var binding *term.Binding
-			if triggerErr == nil {
-				binding = triggerBinding.Extend(lhsBinding)
-			} else {
-				instantiated := trigger.Subst(lhsBinding)
-				eventBinding, err := event.Unify(instantiated)
-				if err != nil {
-					continue
-				}
-				binding = lhsBinding.Extend(eventBinding)
-			}
+			binding := lhsBinding.Extend(eventBinding)
 
 			reserved, err := c.reserveRuleLHS(entry.rule, binding, trigger)
 			if err != nil {
@@ -701,35 +680,17 @@ func (m *Monitor) handleTriggers(c *Config, a term.Term, r *rule.Rule) ([]RuleAp
 	}
 	var C []RuleApplication
 
-	// Try to extract a trigger binding from the event first. When this
-	// succeeds, shared variables narrow the LHS fact search from O(N)
-	// to O(1). Falls back to the original O(N) approach when the raw
-	// trigger contains format expressions with functions of unbound
-	// variables that cannot be evaluated without LHS-derived bindings.
+	// The premises are matched first and the trigger under their values,
+	// so that premise variables take the values of their facts. A trigger
+	// that matches the event as it is only narrows the facts that the
+	// premises are matched against.
 	triggerBinding, triggerErr := a.Unify(rawTriggers[0])
-
-	var lhsPatterns []*rule.Fact
-	if triggerErr == nil {
-		lhsPatterns = make([]*rule.Fact, len(r.LHS))
-		for i, f := range r.LHS {
-			lhsPatterns[i] = f.Subst(triggerBinding)
+	for _, b := range premiseCandidates(c, r, triggerBinding, triggerErr).Values() {
+		u, err := a.Unify(rawTriggers[0].Subst(b))
+		if err != nil {
+			continue
 		}
-	} else {
-		lhsPatterns = r.LHS
-	}
-
-	for _, b := range conflictSetFactsForConfig(c, lhsPatterns).Values() {
-		var bt *term.Binding
-		if triggerErr == nil {
-			bt = triggerBinding.Extend(b)
-		} else {
-			// Fallback: match trigger instantiated with LHS binding.
-			u, err := a.Unify(rawTriggers[0].Subst(b))
-			if err != nil {
-				continue
-			}
-			bt = b.Extend(u)
-		}
+		bt := b.Extend(u)
 
 		d, acts, err := c.ApplyRule(r, bt)
 		if err != nil {
@@ -808,12 +769,30 @@ func (m *Monitor) handleHints(config *Config, event term.Term, entry ruleEntry) 
 	return applications, nil
 }
 
+// premiseCandidates returns the premise substitutions of r in c. If an
+// annotation of r matched the event as it is (annotationErr is nil), only
+// the facts that agree with its binding u are tried. The substitutions
+// still come from the premises alone (conflictSetFactsNarrowed), so every
+// premise variable takes the value of its fact.
+func premiseCandidates(c *Config, r *rule.Rule, u *term.Binding, annotationErr error) *bindingSet {
+	if annotationErr != nil {
+		return conflictSetFactsForConfig(c, r.LHS)
+	}
+	narrowed := make([]*rule.Fact, len(r.LHS))
+	for i, f := range r.LHS {
+		narrowed[i] = f.Subst(u)
+	}
+	return conflictSetFactsNarrowed(c, r.LHS, narrowed)
+}
+
 // hintBindings returns the distinct bindings under which a hint of the
 // rule r of entry matches a in c, each extended by a premise substitution
 // of r.
 //
-// If the hints that match a as they are agree on one binding, the premises
-// are matched under it. A hint that does not match a may still match once
+// If the hints that match a as they are agree on one binding, the facts
+// that the premises are matched against are narrowed by it. The bindings
+// still come from the premises first, then from a hint under them, as with
+// distinct bindings. A hint that does not match a may still match once
 // its premise variables are substituted, if its evaluation failed or if
 // its terms allow it. If there is such a hint, every hint is then matched
 // against a again for each premise substitution. Without a binding, or
@@ -823,6 +802,7 @@ func (m *Monitor) handleHints(config *Config, event term.Term, entry ruleEntry) 
 func (m *Monitor) hintBindings(c *Config, a term.Term, entry ruleEntry) []*term.Binding {
 	r := entry.rule
 	var direct *term.Binding
+	var directHint term.Term
 	ambiguous, substituted := false, false
 	for _, hint := range r.Hints() {
 		u, err := a.Unify(hint)
@@ -831,7 +811,7 @@ func (m *Monitor) hintBindings(c *Config, a term.Term, entry ruleEntry) []*term.
 			continue
 		}
 		if direct == nil {
-			direct = u
+			direct, directHint = u, hint
 		} else if !direct.Equal(u) {
 			ambiguous = true
 		}
@@ -840,13 +820,13 @@ func (m *Monitor) hintBindings(c *Config, a term.Term, entry ruleEntry) []*term.
 		return m.hintBindingsPerPremise(c, a, r, nil)
 	}
 
-	lhs := make([]*rule.Fact, len(r.LHS))
-	for i, f := range r.LHS {
-		lhs[i] = f.Subst(direct)
-	}
+	// The hints that match directly agree on one binding, so each of them
+	// gives the same binding under a premise substitution as directHint.
 	var bindings []*term.Binding
-	for _, b := range conflictSetFactsForConfig(c, lhs).Values() {
-		bindings = append(bindings, direct.Extend(b))
+	for _, b := range premiseCandidates(c, r, direct, nil).Values() {
+		if u, err := a.Unify(directHint.Subst(b)); err == nil {
+			bindings = append(bindings, b.Extend(u))
+		}
 	}
 	if !substituted {
 		return bindings

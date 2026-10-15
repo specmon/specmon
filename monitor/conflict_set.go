@@ -100,18 +100,13 @@ func buildArgConstraints(pArgs []term.Term) argConstraints {
 	return constraints
 }
 
-func collectIndexNeeds[T Unifier[T]](body []T, indexable func(T) bool, name func(T) string, constraintsByBody []argConstraints) (map[conflictKey]*keyIndexNeeds, bool) {
+func collectIndexNeeds(body []*rule.Fact, constraintsByBody []argConstraints) map[conflictKey]*keyIndexNeeds {
 	needsByKey := make(map[conflictKey]*keyIndexNeeds)
-	needAllIndices := false
 
 	for i, p := range body {
 		constraints := constraintsByBody[i]
-		if !indexable(p) {
-			needAllIndices = true
-			continue
-		}
 
-		key := conflictKey{name: name(p), arity: constraints.arity}
+		key := conflictKey{name: p.Name, arity: constraints.arity}
 		needs := needsByKey[key]
 		if needs == nil {
 			needs = &keyIndexNeeds{}
@@ -129,7 +124,7 @@ func collectIndexNeeds[T Unifier[T]](body []T, indexable func(T) bool, name func
 		}
 	}
 
-	return needsByKey, needAllIndices
+	return needsByKey
 }
 
 func (c *argConstraints) matchesArgs(fArgs []term.Term) bool {
@@ -254,37 +249,29 @@ func constantByteLen(t term.Term) (int, bool) {
 	}
 }
 
-// conflictSetSingle matches a single pattern p against items. If
-// persistent is not nil, p matches only items of its kind.
-func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, name func(T) string, args func(T) []term.Term, persistent func(T) bool) *bindingSet {
+// conflictSetSingle matches a single pattern p against items of its kind.
+// If narrow is not nil, only items that its slot filter keeps for p are tried.
+func conflictSetSingle(items []*rule.Fact, p *rule.Fact, narrow *narrowing) *bindingSet {
 	result := newBindingSet()
 
-	pArgs := args(p)
+	pArgs := p.Args
 	constraints := buildArgConstraints(pArgs)
 
-	indexedPattern := indexable(p)
-	pName := ""
-	if indexedPattern {
-		pName = name(p)
-	}
-
 	for _, item := range items {
-		itemArgs := args(item)
+		itemArgs := item.Args
 
-		if indexedPattern {
-			if !indexable(item) || name(item) != pName || len(itemArgs) != len(pArgs) {
-				continue
-			}
+		if item.Name != p.Name || len(itemArgs) != len(pArgs) {
+			continue
 		}
-		if persistent != nil && persistent(item) != persistent(p) {
+		if item.IsPersistent() != p.IsPersistent() {
+			continue
+		}
+		if narrow != nil && !narrow.slot(0, item) {
 			continue
 		}
 
-		// Only apply the argument prefilter when the pattern actually carries a
-		// constraint. matchesArgs gates on arity first, so an unconstrained
-		// pattern (a bare variable or a constant, arity 0) would otherwise
-		// reject every item with arguments before Unify runs. This mirrors the
-		// guard in the multi-pattern path.
+		// Apply the argument prefilter when the pattern carries a constraint,
+		// as in the multi-pattern path.
 		if len(constraints.constPositions) > 0 || constraints.hasDisallowConstant || constraints.hasFormatConstraints {
 			if !constraints.matchesArgs(itemArgs) {
 				continue
@@ -301,38 +288,39 @@ func conflictSetSingle[T Unifier[T]](items []T, p T, indexable func(T) bool, nam
 	return result
 }
 
+// narrowing restricts the candidates of each pattern of a conflict set
+// without changing the order in which the patterns are tried: the pattern
+// body[i] is tried only on the items for which slot(i, item) holds, and the
+// patterns are ordered by counts[i], the number of candidates that body[i]
+// has without the restriction.
+type narrowing struct {
+	slot   func(int, *rule.Fact) bool
+	counts []int
+}
+
 // conflictSet matches the patterns of body against items, using every item
-// at most once per binding. If persistent is not nil, a pattern matches
-// only items of its kind, and a persistent item may serve several patterns
-// of one binding. A match does not consume it.
-func conflictSet[T Unifier[T]](
-	items []T,
-	body []T,
-	indexable func(T) bool,
-	name func(T) string,
-	args func(T) []term.Term,
-	persistent func(T) bool,
-) *bindingSet {
+// at most once per binding. A pattern matches only items of its kind,
+// and a persistent item may serve several patterns
+// of one binding. A match does not consume it. If narrow is not nil, it
+// restricts the candidates of each pattern.
+func conflictSet(items, body []*rule.Fact, narrow *narrowing) *bindingSet {
 	log.Debugf("conflictSet( items=%d, body=%d )\n", len(items), len(body))
 
 	if len(body) == 1 {
-		return conflictSetSingle(items, body[0], indexable, name, args, persistent)
+		return conflictSetSingle(items, body[0], narrow)
 	}
 
 	constraintsByBody := make([]argConstraints, len(body))
 	for i, p := range body {
-		constraintsByBody[i] = buildArgConstraints(args(p))
+		constraintsByBody[i] = buildArgConstraints(p.Args)
 	}
-	needsByKey, needAllIndices := collectIndexNeeds(body, indexable, name, constraintsByBody)
+	needsByKey := collectIndexNeeds(body, constraintsByBody)
 
 	// Index items by name+arity and per-argument constants.
 	itemsByKey := make(map[conflictKey]*itemBucket, len(needsByKey))
 	for i, item := range items {
-		if !indexable(item) {
-			continue
-		}
-		itemArgs := args(item)
-		key := conflictKey{name: name(item), arity: len(itemArgs)}
+		itemArgs := item.Args
+		key := conflictKey{name: item.Name, arity: len(itemArgs)}
 		needs := needsByKey[key]
 		if needs == nil {
 			continue
@@ -375,41 +363,25 @@ func conflictSet[T Unifier[T]](
 	prefilter := make([][]int, n)
 	order := make([]int, n)
 
-	var allIndices []int
-	if needAllIndices {
-		allIndices = make([]int, len(items))
-		for j := range items {
-			allIndices[j] = j
-		}
-	}
-
 	for i, p := range body {
 		constraints := constraintsByBody[i]
 
-		var candIndices []int
-		if indexable(p) {
-			key := conflictKey{name: name(p), arity: constraints.arity}
-			bucket := itemsByKey[key]
-			if bucket == nil || len(bucket.indices) == 0 {
-				// No matches possible at all.
+		key := conflictKey{name: p.Name, arity: constraints.arity}
+		bucket := itemsByKey[key]
+		if bucket == nil || len(bucket.indices) == 0 {
+			// No matches possible at all.
+			return newBindingSet()
+		}
+		candIndices := bucket.indices
+		if len(constraints.constPositions) > 0 {
+			candIndices = selectConstCandidates(bucket.constIndex, constraints.constPositions)
+			if len(candIndices) == 0 {
 				return newBindingSet()
 			}
-			candIndices = bucket.indices
-			if len(constraints.constPositions) > 0 {
-				candIndices = selectConstCandidates(bucket.constIndex, constraints.constPositions)
-				if len(candIndices) == 0 {
-					return newBindingSet()
-				}
-			}
-		} else {
-			// Fallback: no indexing possible, scan all items.
-			candIndices = allIndices
 		}
-		if persistent != nil {
-			otherKind := func(idx int) bool { return persistent(items[idx]) != persistent(p) }
-			if slices.ContainsFunc(candIndices, otherKind) {
-				candIndices = slices.DeleteFunc(slices.Clone(candIndices), otherKind)
-			}
+		otherKind := func(idx int) bool { return items[idx].IsPersistent() != p.IsPersistent() }
+		if slices.ContainsFunc(candIndices, otherKind) {
+			candIndices = slices.DeleteFunc(slices.Clone(candIndices), otherKind)
 		}
 
 		if len(constraints.constPositions) == 0 && !constraints.hasDisallowConstant && !constraints.hasFormatConstraints {
@@ -420,7 +392,7 @@ func conflictSet[T Unifier[T]](
 
 		filtered := make([]int, 0, len(candIndices))
 		for _, idx := range candIndices {
-			fArgs := args(items[idx])
+			fArgs := items[idx].Args
 			if constraints.matchesArgs(fArgs) {
 				filtered = append(filtered, idx)
 			}
@@ -429,8 +401,24 @@ func conflictSet[T Unifier[T]](
 		prefilter[i] = filtered
 		order[i] = i
 	}
-	// Sort atoms by increasing number of prefiltered candidates to prune early.
-	sort.Slice(order, func(i, j int) bool { return len(prefilter[order[i]]) < len(prefilter[order[j]]) })
+	// Sort atoms by increasing number of prefiltered candidates to prune
+	// early. A narrowing keeps the order of the unrestricted candidates, so
+	// that the bindings, and the items that bind a shared variable first,
+	// are those of the unrestricted match, in its order.
+	counts := make([]int, n)
+	for i := range prefilter {
+		counts[i] = len(prefilter[i])
+	}
+	if narrow != nil {
+		counts = narrow.counts
+		for i := range prefilter {
+			prefilter[i] = slices.DeleteFunc(slices.Clone(prefilter[i]), func(idx int) bool { return !narrow.slot(i, items[idx]) })
+			if len(prefilter[i]) == 0 {
+				return newBindingSet()
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return counts[order[i]] < counts[order[j]] })
 
 	result := newBindingSet()
 
@@ -453,7 +441,7 @@ func conflictSet[T Unifier[T]](
 		p := body[idx]
 		// Apply current binding once per depth.
 		ps := p.Subst(b)
-		psArgs := args(ps)
+		psArgs := ps.Args
 
 		for _, itemIdx := range prefilter[idx] {
 			// Skip if this item has already been used in this binding path
@@ -462,7 +450,7 @@ func conflictSet[T Unifier[T]](
 			}
 
 			f := items[itemIdx]
-			fArgs := args(f)
+			fArgs := f.Args
 			if len(psArgs) == len(fArgs) {
 				skip := false
 				for i, psArg := range psArgs {
@@ -481,7 +469,7 @@ func conflictSet[T Unifier[T]](
 			if err != nil {
 				continue
 			}
-			reuse := persistent != nil && persistent(f)
+			reuse := f.IsPersistent()
 			if !reuse {
 				usedItems[itemIdx] = true
 			}
@@ -504,12 +492,7 @@ func conflictSet[T Unifier[T]](
 // constants. A pattern matches only facts of its kind. A linear fact is used
 // by at most one pattern per binding. A persistent fact may be used by several.
 func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
-	return conflictSet(facts, body,
-		func(_ *rule.Fact) bool { return true },
-		func(f *rule.Fact) string { return f.Name },
-		func(f *rule.Fact) []term.Term { return f.Args },
-		(*rule.Fact).IsPersistent,
-	)
+	return conflictSet(facts, body, nil)
 }
 
 // conflictSetFactsForConfig is like conflictSetFacts but draws candidates
@@ -521,6 +504,119 @@ func conflictSetFacts(facts []*rule.Fact, body []*rule.Fact) *bindingSet {
 // as often as body has patterns of its name, which is all that the
 // conflict set can use, so many copies cost as little as one.
 func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
+	return conflictSetFacts(configCandidates(c, body), body)
+}
+
+// conflictSetFactsNarrowed is like conflictSetFactsForConfig, but it tries
+// the premise body[i] only on the facts that may match narrowed[i], which
+// is body[i] with the values of some of its variables substituted, as an
+// annotation that matched the event gives them. The bindings, their order
+// and the facts that bind each variable are those of matching body alone,
+// restricted to these candidates, so every premise variable takes the value
+// of its fact, as when the premises are matched first.
+func conflictSetFactsNarrowed(c *Config, body, narrowed []*rule.Fact) *bindingSet {
+	var items []*rule.Fact
+	for i, p := range body {
+		if slices.ContainsFunc(body[:i], func(q *rule.Fact) bool { return q.Name == p.Name }) {
+			continue
+		}
+		// Keep the facts that may match a narrowed premise of the name.
+		var same []int
+		for j, q := range body {
+			if q.Name == p.Name {
+				same = append(same, j)
+			}
+		}
+		for _, e := range c.factsByName[p.Name].entries {
+			for _, j := range same {
+				if mayMatchArgs(narrowed[j].Args, e.fact.Args) {
+					for range min(e.count, len(same)) {
+						items = append(items, e.fact)
+					}
+					break
+				}
+			}
+		}
+	}
+	return conflictSet(items, body,
+		&narrowing{
+			slot:   func(i int, f *rule.Fact) bool { return mayMatchArgs(narrowed[i].Args, f.Args) },
+			counts: candidateCounts(c, body),
+		},
+	)
+}
+
+// candidateCounts returns, for each premise of body, the number of
+// candidates that conflictSet selects for it from the facts of
+// conflictSetFactsForConfig, which fixes the order of the premises. A single
+// premise needs no order.
+func candidateCounts(c *Config, body []*rule.Fact) []int {
+	counts := make([]int, len(body))
+	if len(body) < 2 {
+		return counts
+	}
+	for i, p := range body {
+		slots := 0
+		for _, q := range body {
+			if q.Name == p.Name {
+				slots++
+			}
+		}
+		constraints := buildArgConstraints(p.Args)
+		checked := len(constraints.constPositions) > 0 || constraints.hasDisallowConstant || constraints.hasFormatConstraints
+		for _, e := range c.factsByName[p.Name].entries {
+			f := e.fact
+			if len(f.Args) == len(p.Args) && f.IsPersistent() == p.IsPersistent() && (!checked || constraints.matchesArgs(f.Args)) {
+				counts[i] += min(e.count, slots)
+			}
+		}
+	}
+	return counts
+}
+
+// mayMatchArgs reports whether the pattern arguments may match the ground
+// arguments args, without unifying: constants must be equal, constructors
+// must agree in name and arity, and a variable or an evaluated function
+// matches anything. Since it neither binds nor evaluates, it keeps every
+// fact that unification could match, whatever the types of the values.
+func mayMatchArgs(pattern, args []term.Term) bool {
+	if len(pattern) != len(args) {
+		return false
+	}
+	for i, p := range pattern {
+		if !mayMatch(p, args[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func mayMatch(p, t term.Term) bool {
+	switch p := p.(type) {
+	case *term.Variable:
+		return true
+	case *term.Function:
+		if p.MayEvalToConstant() {
+			return true
+		}
+		switch t := t.(type) {
+		case *term.Function:
+			return t.Name == p.Name && mayMatchArgs(p.Args, t.Args)
+		case *term.Variable:
+			return true
+		}
+		// A constructor never unifies with a constant.
+		return false
+	}
+	if t.GetType() == term.ConstantType {
+		return p.Equal(t)
+	}
+	return true
+}
+
+// configCandidates returns the facts of c that the patterns of body may
+// match, as appendConstCandidates selects them.
+func configCandidates(c *Config, body []*rule.Fact) []*rule.Fact {
 	// Bodies have a handful of patterns, so scanning them is cheaper than
 	// building maps of their names.
 	var items []*rule.Fact
@@ -537,7 +633,7 @@ func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
 		}
 		items = appendConstCandidates(items, c.factsByName[name], body, name, slots)
 	}
-	return conflictSetFacts(items, body)
+	return items
 }
 
 // constCandidateMinBucket is the bucket size from which

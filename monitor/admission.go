@@ -53,12 +53,12 @@ var forbiddenPremiseFunctions = map[string]bool{
 }
 
 // checkPremiseParsing requires that every premise of r can be matched
-// against a fact without values from the trigger or hint. So a premise
-// contains no forbidden function and no variable at a position
-// that parsing cannot extract (patternVariables), even one that another
-// premise binds: the premises are matched in an order that depends on
-// the facts, and the arguments of a premise are evaluated before any of
-// them binds.
+// against a fact on its own, since premise matching binds every premise
+// variable before a trigger or hint is matched. So a premise contains no
+// forbidden premise function and no variable at a position that parsing
+// cannot extract (patternVariables), even one that another premise
+// binds: the premises are matched in an order that depends on the facts,
+// and the arguments of a premise are evaluated before any of them binds.
 func checkPremiseParsing(r *rule.Rule) error {
 	for _, f := range r.LHS {
 		for _, arg := range f.Args {
