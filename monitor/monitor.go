@@ -38,13 +38,6 @@ import (
 )
 
 const (
-	// RewriteEventName denotes the event
-	// that is used for outputting preprocessed events.
-	//
-	// A pre-process event should have exactly one argument
-	// that is automatically unwrapped when outputted.
-	RewriteEventName = "PPEvent"
-
 	outChanSize      = 4096
 	consumedChanSize = 4096
 )
@@ -52,6 +45,10 @@ const (
 var (
 	ErrNoApplicableRule    = errors.New("no applicable rule found")
 	ErrRestrictionViolated = errors.New("restriction violated")
+	// ErrNondeterministicRewrite reports that the rule applications for one
+	// event emit different event sequences, which a single output stream
+	// cannot represent.
+	ErrNondeterministicRewrite = errors.New("nondeterministic rewrite")
 )
 
 type Unifier[T any] interface {
@@ -269,10 +266,27 @@ type RuleApplication struct {
 // It returns the action facts produced by each successful rule application
 // (one slice per RuleApplication) and an error if processing failed.
 func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
+	applications, err := m.processEvent(a)
+	if err != nil {
+		return nil, err
+	}
+
+	var actions [][]*rule.Fact
+	for _, application := range applications {
+		if len(application.actions) > 0 {
+			actions = append(actions, application.actions)
+		}
+	}
+	return actions, nil
+}
+
+// processEvent consumes an event from every configuration and returns all
+// rule applications, including those without actions.
+func (m *Monitor) processEvent(a term.Term) ([]RuleApplication, error) {
 	log.Debugf("ProcessEvent(%s)\n", a)
 
 	updated := data.NewHashSet[*Config]()
-	var actions [][]*rule.Fact
+	var applied []RuleApplication
 
 	aKey, err := ruleKeyForTerm(a)
 	if err != nil {
@@ -287,10 +301,8 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 
 		for _, t := range applications {
 			updated.Add(t.config)
-			if len(t.actions) > 0 {
-				actions = append(actions, t.actions)
-			}
 		}
+		applied = append(applied, applications...)
 	}
 
 	if updated.Size() > 1 {
@@ -311,7 +323,7 @@ func (m *Monitor) ProcessEvent(a term.Term) ([][]*rule.Fact, error) {
 
 	m.configs = updated
 
-	return actions, nil
+	return applied, nil
 }
 
 // processConfigEvent returns every transition that consumes event from c.
@@ -1049,7 +1061,7 @@ func (m *Monitor) ProcessEvents(
 
 			m.stats.LatenciesReceived = append(m.stats.LatenciesReceived, time.Since(time.Unix(0, event.Time)))
 
-			actions, err := m.ProcessEvent(event.Event)
+			applications, err := m.processEvent(event.Event)
 			if err != nil {
 				if errors.Is(err, ErrNoApplicableRule) {
 					result.Violation = &ViolationInfo{
@@ -1068,21 +1080,17 @@ func (m *Monitor) ProcessEvents(
 			m.stats.LatenciesProcessed = append(m.stats.LatenciesProcessed, time.Since(time.Unix(0, event.Time)))
 
 			if rewrite {
-				for _, group := range actions {
-					for _, f := range group {
-						if r := getRewriteTerm(f); r != nil {
-							fr, err := term.AsFunction(r)
-							if err != nil {
-								result.Err = fmt.Errorf("rewrite action %s: %w", f, err)
-								return
-							}
-							select {
-							case out <- &TimedEvent{Time: event.Time, Event: fr}:
-							case <-ctx.Done():
-								result.Err = ctx.Err()
-								return
-							}
-						}
+				outputs, err := rewriteOutputSequence(event.Event, applications)
+				if err != nil {
+					result.Err = err
+					return
+				}
+				for _, output := range outputs {
+					select {
+					case out <- &TimedEvent{Time: event.Time, Event: output}:
+					case <-ctx.Done():
+						result.Err = ctx.Err()
+						return
 					}
 				}
 			} else {
@@ -1146,17 +1154,45 @@ func cloneTerm(t term.Term) term.Term {
 	}
 }
 
-func getRewriteTerm(f *rule.Fact) term.Term {
-	if f.Name == RewriteEventName && len(f.Args) == 1 {
-		return f.Args[0]
+// rewriteOutputSequence returns the events that the rule applications for
+// one raw event emit. The caller supplies at least one application. As in
+// the integrated pipeline, identical sequences are emitted once. Different
+// sequences would be separate branches, which a single output stream cannot
+// represent, so they are an error.
+func rewriteOutputSequence(event term.Term, applications []RuleApplication) ([]*term.Function, error) {
+	var sequences [][]*term.Function
+	for _, application := range applications {
+		outputs, err := rewriteOutputs(application.actions)
+		if err != nil {
+			return nil, err
+		}
+		for _, output := range outputs {
+			if err := checkRewriteEvent(output); err != nil {
+				return nil, fmt.Errorf("invalid rewritten event: %w", err)
+			}
+		}
+		if !slices.ContainsFunc(sequences, func(sequence []*term.Function) bool {
+			return outputsEqual(sequence, outputs)
+		}) {
+			sequences = append(sequences, outputs)
+		}
 	}
-
-	return nil
+	if len(sequences) > 1 {
+		return nil, fmt.Errorf("%w: the rule applications for %.120s emit %d different event sequences. "+
+			"specmon monitor -R keeps them apart as separate branches", ErrNondeterministicRewrite, event, len(sequences))
+	}
+	return sequences[0], nil
 }
 
 // CheckWellformedness checks if the rules are well-formed.
 func checkWellformedness(rules []*rule.Rule) error {
 	for _, r := range rules {
+		for _, action := range r.Act {
+			call, _ := term.SplitPair(action.RewriteTerm())
+			if fn, ok := call.(*term.Function); ok && fn != nil && forbiddenRewriteHead(fn.Name) {
+				return fmt.Errorf("rule %s: built-in %s cannot name a rewritten event", r.Name, fn.Name)
+			}
+		}
 		// A hint rule must have a non-empty LHS.
 		if r.HasHints() && len(r.LHS) == 0 {
 			return fmt.Errorf("hint rule %s has empty LHS", r.Name)
@@ -1170,7 +1206,7 @@ func checkWellformedness(rules []*rule.Rule) error {
 // a hint/trigger pair. Used to bucket rules into triggerRules / hintRules
 // so dispatch is by (name, arity) rather than name only.
 func splitPairSignature(t term.Term) (string, int, error) {
-	fn, _ := splitPair(t)
+	fn, _ := term.SplitPair(t)
 	if fn == nil {
 		return "", 0, fmt.Errorf("expected event pair, got %s", t)
 	}
@@ -1189,4 +1225,25 @@ func ruleKeyForTerm(t term.Term) (ruleKey, error) {
 		return ruleKey{}, err
 	}
 	return ruleKey{name: name, arity: arity}, nil
+}
+
+// forbiddenRewriteHead applies only to emitted calls. Pair-headed calls
+// and built-ins nested in a call's arguments remain valid.
+func forbiddenRewriteHead(name string) bool {
+	return name != term.PairFunctionName && term.ReservedNames.Contains(name)
+}
+
+func checkRewriteEvent(output term.Term) error {
+	call, _ := term.SplitPair(output)
+	fn, ok := call.(*term.Function)
+	if !ok || fn == nil {
+		if call == nil {
+			return fmt.Errorf("expected event pair, got %s", output)
+		}
+		return fmt.Errorf("expected event function, got %s", call)
+	}
+	if forbiddenRewriteHead(fn.Name) {
+		return fmt.Errorf("built-in %s cannot name a rewritten event", fn.Name)
+	}
+	return nil
 }

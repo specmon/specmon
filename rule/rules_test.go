@@ -202,6 +202,61 @@ func TestFactUnifyPreservesEvaluationErrors(t *testing.T) {
 	}
 }
 
+func TestEvaluateGroundKeepsRewriteOutputCall(t *testing.T) {
+	t.Parallel()
+
+	x := term.NewVariable("x")
+	inner := term.NewFunction("inner", []term.Term{x})
+	outer := term.NewFunction("output", []term.Term{inner, x})
+	result := term.NewFunction(term.AddFunctionName, []term.Term{outer, inner})
+	output := rule.NewFact(rule.RewriteEventName, []term.Term{
+		term.NewFunction(term.PairFunctionName, []term.Term{outer, result}),
+	}, rule.LinearFact)
+	r := &rule.Rule{
+		Name: "RewriteOutput",
+		Act: []*rule.Fact{
+			output,
+			rule.NewFact("Observed", []term.Term{outer, inner}, rule.LinearFact),
+		},
+		RHS: []*rule.Fact{rule.NewFact("Done", []term.Term{outer, inner}, rule.LinearFact)},
+		Attrs: map[string]rule.Attribute{
+			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{
+				term.NewFunction(term.PairFunctionName, []term.Term{outer, term.NewConstant[int64](7)}),
+				term.NewFunction(term.PairFunctionName, []term.Term{inner, term.NewConstant[int64](2)}),
+			}},
+		},
+	}
+	original := r.String()
+	binding := term.BindingFromMap(map[term.Term]term.Term{x: term.NewConstant("input")})
+
+	evaluated, err := r.EvaluateGround(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOutput := rule.NewFact(rule.RewriteEventName, []term.Term{
+		term.NewFunction(term.PairFunctionName, []term.Term{
+			term.NewFunction("output", []term.Term{term.NewConstant[int64](2), term.NewConstant("input")}),
+			term.NewConstant[int64](9),
+		}),
+	}, rule.LinearFact)
+	if !evaluated.Act[0].Equal(wantOutput) {
+		t.Fatalf("rewrite action = %s, want %s", evaluated.Act[0], wantOutput)
+	}
+	wantObserved := rule.NewFact("Observed", []term.Term{
+		term.NewConstant[int64](7), term.NewConstant[int64](2),
+	}, rule.LinearFact)
+	if !evaluated.Act[1].Equal(wantObserved) {
+		t.Fatalf("ordinary action = %s, want %s", evaluated.Act[1], wantObserved)
+	}
+	wantDone := rule.NewFact("Done", wantObserved.Args, rule.LinearFact)
+	if !evaluated.RHS[0].Equal(wantDone) {
+		t.Fatalf("conclusion = %s, want %s", evaluated.RHS[0], wantDone)
+	}
+	if r.String() != original {
+		t.Fatalf("EvaluateGround mutated the input rule:\n%s", r)
+	}
+}
+
 func BenchmarkRuleSubst(b *testing.B) {
 	value := term.NewVariable("value")
 	fact := rule.NewFact("BenchmarkSubst", []term.Term{value}, rule.LinearFact)

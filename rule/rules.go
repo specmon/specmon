@@ -34,6 +34,10 @@ import (
 
 const (
 	RoleWildcard = "*"
+
+	// RewriteEventName denotes the action used to output a rewritten event.
+	// Its single argument is unwrapped when the event is emitted.
+	RewriteEventName = "PPEvent"
 )
 
 type Rule struct {
@@ -207,8 +211,16 @@ func (r *Rule) Subst(b *term.Binding) *Rule {
 func (r *Rule) EvaluateGround(b *term.Binding) (*Rule, error) {
 	source := r.Subst(b)
 	evaluated := source
-	for _, trigger := range source.Triggers() {
+	triggers := source.Triggers()
+	for _, trigger := range triggers {
 		evaluated = evaluated.Subst(term.BindingFromPair(trigger))
+	}
+	if len(triggers) > 0 {
+		for i, action := range source.Act {
+			if output, ok := evaluateRewriteOutput(action, triggers); ok {
+				evaluated.Act[i] = output
+			}
+		}
 	}
 	evaluated, err := evaluated.ReplaceFormats()
 	if err != nil {
@@ -218,6 +230,30 @@ func (r *Rule) EvaluateGround(b *term.Binding) (*Rule, error) {
 		return nil, fmt.Errorf("expected ground rule (%s), got variables: %v", evaluated.Name, source.Vars())
 	}
 	return evaluated, nil
+}
+
+// evaluateRewriteOutput evaluates a rewrite action PPEvent(<g(t1, ..., tn), r>)
+// of a triggered rule. The outer call g(...) names the emitted event and is
+// kept, even where it equals a trigger's computation. Its arguments and r
+// are evaluated like any other term: every trigger's computation is
+// replaced by its observed result. It reports false for other actions.
+func evaluateRewriteOutput(action *Fact, triggers []term.Term) (*Fact, bool) {
+	call, result := term.SplitPair(action.RewriteTerm())
+	fn, ok := call.(*term.Function)
+	if !ok || fn == nil {
+		return nil, false
+	}
+
+	args := slices.Clone(fn.Args)
+	for _, trigger := range triggers {
+		split := term.BindingFromPair(trigger)
+		for i := range args {
+			args[i] = args[i].Subst(split)
+		}
+		result = result.Subst(split)
+	}
+	output := term.NewFunction(term.PairFunctionName, []term.Term{term.NewFunction(fn.Name, args), result})
+	return NewFact(action.Name, []term.Term{output}, action.Type), true
 }
 
 func (r *Rule) IsGround() bool {

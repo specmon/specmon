@@ -52,7 +52,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 			rule.NewFact("State", []term.Term{term.NewVariable("x")}, rule.LinearFact),
 		},
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("hintOut", []term.Term{term.NewVariable("x")}),
 			}, rule.LinearFact),
 		},
@@ -95,7 +95,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		},
 		RHS: []*rule.Fact{},
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("t1", []term.Term{term.NewVariable("x")}),
 			}, rule.LinearFact),
 		},
@@ -119,7 +119,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 		},
 		RHS: []*rule.Fact{},
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("t2", []term.Term{term.NewVariable("x")}),
 			}, rule.LinearFact),
 		},
@@ -172,7 +172,7 @@ func TestMonitorHintTriggerActionsBothSurvive(t *testing.T) {
 	var sawT1, sawT2 bool
 	hintCount := 0
 	for _, f := range flat {
-		if f.Name != monitor.RewriteEventName || len(f.Args) != 1 {
+		if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 			continue
 		}
 		fn, err := term.AsFunction(f.Args[0])
@@ -217,7 +217,7 @@ func TestMonitorHintTriggerEmptyActionsBothSurvive(t *testing.T) {
 			rule.NewFact("State", []term.Term{term.NewVariable("x")}, rule.LinearFact),
 		},
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("hintOut", []term.Term{term.NewVariable("x")}),
 			}, rule.LinearFact),
 		},
@@ -304,7 +304,7 @@ func TestMonitorHintTriggerEmptyActionsBothSurvive(t *testing.T) {
 	hintCount := 0
 	for _, group := range actions {
 		for _, f := range group {
-			if f.Name != monitor.RewriteEventName || len(f.Args) != 1 {
+			if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 				continue
 			}
 			fn, err := term.AsFunction(f.Args[0])
@@ -415,7 +415,7 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 			rule.NewFact("State", []term.Term{term.NewVariable("ret")}, rule.LinearFact),
 		},
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("triggered", []term.Term{term.NewVariable("ret")}),
 			}, rule.LinearFact),
 		},
@@ -438,7 +438,7 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 		},
 		// No RHS, no trigger, no hint -> epsilon rule.
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				term.NewFunction("promoted", []term.Term{term.NewVariable("x")}),
 			}, rule.LinearFact),
 		},
@@ -476,7 +476,7 @@ func TestMonitorEpsilonActionsForwarded(t *testing.T) {
 
 	var sawTriggered, sawPromoted bool
 	for _, f := range flat {
-		if f.Name != monitor.RewriteEventName || len(f.Args) != 1 {
+		if f.Name != rule.RewriteEventName || len(f.Args) != 1 {
 			continue
 		}
 		fn, err := term.AsFunction(f.Args[0])

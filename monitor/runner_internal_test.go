@@ -136,7 +136,7 @@ func runTestPipeline(t *testing.T, rewriteRules, mainRules []*rule.Rule, events 
 func emitEvents(events ...*term.Function) []*rule.Fact {
 	actions := make([]*rule.Fact, len(events))
 	for i, event := range events {
-		actions[i] = rule.NewFact(RewriteEventName, []term.Term{event}, rule.LinearFact)
+		actions[i] = rule.NewFact(rule.RewriteEventName, []term.Term{event}, rule.LinearFact)
 	}
 	return actions
 }

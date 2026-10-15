@@ -150,7 +150,7 @@ func rewritingRunnerMonitor(t *testing.T) *monitor.Monitor {
 	r := &rule.Rule{
 		Name: runnerRuleName,
 		Act: []*rule.Fact{
-			rule.NewFact(monitor.RewriteEventName, []term.Term{
+			rule.NewFact(rule.RewriteEventName, []term.Term{
 				runnerEvent(runnerOutputEventName, value),
 			}, rule.LinearFact),
 		},
@@ -587,7 +587,7 @@ func TestRunPipelineReportsViolationBeforeLaterParseError(t *testing.T) {
 		rewriter, err := monitor.NewMonitor([]*rule.Rule{{
 			Name: runnerRuleName,
 			Act: []*rule.Fact{
-				rule.NewFact(monitor.RewriteEventName, []term.Term{runnerEvent(runnerOutputEventName, value)}, rule.LinearFact),
+				rule.NewFact(rule.RewriteEventName, []term.Term{runnerEvent(runnerOutputEventName, value)}, rule.LinearFact),
 			},
 			Attrs: map[string]rule.Attribute{
 				rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{runnerEvent(runnerInputEventName, value)}},

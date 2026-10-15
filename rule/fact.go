@@ -310,3 +310,12 @@ func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 
 	return newFacts
 }
+
+// RewriteTerm returns the sole argument of a rewrite action, or nil for
+// other actions. The caller validates the emitted event's shape.
+func (f *Fact) RewriteTerm() term.Term {
+	if f.Name == RewriteEventName && len(f.Args) == 1 {
+		return f.Args[0]
+	}
+	return nil
+}

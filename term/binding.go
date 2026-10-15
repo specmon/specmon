@@ -73,14 +73,11 @@ func BindingFromMap(m map[Term]Term) *Binding {
 // It returns an empty binding if t is not a pair of two terms.
 func BindingFromPair(t Term) *Binding {
 	b := NewBinding()
-	pair, err := AsFunction(t)
-	if err != nil || pair == nil || pair.Name != PairFunctionName || len(pair.Args) != 2 {
+	first, second := SplitPair(t)
+	if first == nil || second == nil {
 		return b
 	}
-	if pair.Args[0] == nil || pair.Args[1] == nil {
-		return b
-	}
-	b.Set(pair.Args[0], pair.Args[1])
+	b.Set(first, second)
 	return b
 }
 

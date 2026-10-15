@@ -122,3 +122,24 @@ rule Collect_Parts [trigger=[<part1_Leave(tid, id, a), <>>,
                              <part2_Leave(tid, id, b), <>>]]:
   [ ] --[ PPEvent(<combined(id, a, b), <>>) ]-> [ ]
 ```
+
+### Computations in rewrite actions
+
+In a rewrite rule, as in a monitoring rule, a computation denotes its observed result. A trigger `<f(x), y>` binds the computation `f(x)` to the result `y`, so `f(x)` elsewhere in the rule evaluates to `y`.
+
+The outer call of an emitted event is the exception. In `PPEvent(<g(t1, ..., tn), r>)`, the call `g(...)` names the event and is kept as written, even where it equals a trigger's computation. Its arguments `t1, ..., tn` and the result `r` are evaluated as usual. A rule can therefore pass an event through unchanged:
+
+```tamarin
+rule PassThrough [trigger=[<f(x), y>]]:
+  [ ] --[ PPEvent(<f(x), y>) ]-> [ ]
+```
+
+For the event `<f(0x01), 0x02>`, this rule emits `<f(0x01), 0x02>`. A computation nested inside the outer call still denotes its result: with the same trigger, `PPEvent(<wrapped(f(x)), <>>)` emits `<wrapped(0x02), <>>`.
+
+Rewrite events must have a function call as their first component. The outer name cannot be a built-in (`slice`, `reverse`, `cat`, `byte`, `int`, `string`, `add`, `and`, `or`, `xor` or `not`). Explicit built-in heads fail loading, and calls bound dynamically are checked when their output is consumed. Pair-headed calls remain allowed. Built-ins nested in the arguments or result evaluate normally: `PPEvent(<receive(reverse(x)), r>)` with `x = 0x0102` and `r = <>` emits `<receive(0x0201), <>>`.
+
+Triggered and hinted rewrite rules are used as written. Standalone `rewrite` decomposes other rules unless they have `no-decomp`, so their emitted call can be replaced by an observed result. Integrated `monitor -R` loads parsed rewrite rules without this decomposition. Give rewrite rules explicit triggers when they are intended to rewrite individual input events.
+
+### Several rules for one event
+
+If several rules, or several matches of one rule, apply to the same event, each rule application is a separate branch. `specmon monitor --rewrite-with` keeps these branches apart: each branch passes its own events to the monitor, and a branch whose events the monitor rejects ends. The standalone `specmon rewrite` command writes a single event stream and therefore requires a deterministic rewrite. Branches that emit the same events are merged, so such events are written once. If the branches for an event emit different events, including a branch that emits none, the command fails with a `nondeterministic rewrite` error that names the event.

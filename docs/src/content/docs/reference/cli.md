@@ -295,7 +295,7 @@ terminated and no error line is printed.
 
 **Usage**: `specmon rewrite [flags] <spec-path>`
 
-**Description**: Rewrite low-level function-call traces into abstract SpecMon events using `PPEvent(...)` rules. Useful for normalizing library call chains and renaming functions.
+**Description**: Rewrite low-level function-call traces into abstract SpecMon events using `PPEvent(...)` rules. Useful for normalizing library call chains and renaming functions. The output is a single event stream, so the rewrite must be deterministic: if the rule applications for one event emit different events, the command fails with a `nondeterministic rewrite` error (see [**Several rules for one event**](/specifications/rewriting/#several-rules-for-one-event)).
 
 **Arguments**:
 - `<spec-path>` - Path to the Tamarin specification file containing rewrite rules

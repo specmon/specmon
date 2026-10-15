@@ -533,22 +533,6 @@ func (c *Config) ApplyRule(r *rule.Rule, b *term.Binding) (*Config, []*rule.Fact
 	return d, t.Act, nil
 }
 
-func splitPair(t term.Term) (term.Term, term.Term) {
-	f, err := term.AsFunction(t)
-	if err != nil || f == nil {
-		return nil, nil
-	}
-
-	if f.Name != term.PairFunctionName || len(f.Args) != 2 {
-		return nil, nil
-	}
-
-	fst := f.Args[0]
-	snd := f.Args[1]
-
-	return fst, snd
-}
-
 // restrSatisfied checks the restriction actions of trace. A violated
 // restriction is ErrRestrictionViolated; a malformed one is another error.
 func restrSatisfied(trace []*rule.Fact) error {

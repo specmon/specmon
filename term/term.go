@@ -1594,3 +1594,13 @@ func (ts Terms) Subst(b *Binding) Terms {
 func internalByteOrder() binary.ByteOrder {
 	return binary.LittleEndian
 }
+
+// SplitPair returns a pair's two components, or nil components for any
+// other shape. It does not validate the components themselves.
+func SplitPair(t Term) (Term, Term) {
+	f, err := AsFunction(t)
+	if err != nil || f == nil || f.Name != PairFunctionName || len(f.Args) != 2 {
+		return nil, nil
+	}
+	return f.Args[0], f.Args[1]
+}

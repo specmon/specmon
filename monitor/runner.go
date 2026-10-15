@@ -443,6 +443,9 @@ func advanceMainConfigs(
 ) (mainAdvance, error) {
 	current := configs
 	for i, output := range outputs {
+		if err := checkRewriteEvent(output); err != nil {
+			return mainAdvance{}, fmt.Errorf("invalid rewritten event: %w", err)
+		}
 		key, err := ruleKeyForTerm(output)
 		if err != nil {
 			return mainAdvance{}, fmt.Errorf("invalid rewritten event: %w", err)
@@ -459,8 +462,8 @@ func advanceMainConfigs(
 		}
 		if next.Empty() {
 			processed := make([]term.Term, i)
-			for j := range i {
-				processed[j] = outputs[j]
+			for j, previous := range outputs[:i] {
+				processed[j] = previous
 			}
 			return mainAdvance{
 				failure: &pipelineFailure{
@@ -502,7 +505,7 @@ func recordPipelineOutputs(
 func rewriteOutputs(actions []*rule.Fact) ([]*term.Function, error) {
 	var outputs []*term.Function
 	for _, action := range actions {
-		rewriteTerm := getRewriteTerm(action)
+		rewriteTerm := action.RewriteTerm()
 		if rewriteTerm == nil {
 			continue
 		}
