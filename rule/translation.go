@@ -536,3 +536,11 @@ func IsStartRuleOf(r1, r2 *Rule) bool {
 
 	return strings.HasPrefix(r2.Name, ruleName)
 }
+
+// MatchesSplitStateName recognizes the end-rule and split-state naming
+// relation. This is not provenance: prefix-related source names can
+// overlap, for example R_End and a state named ST_R_g_y_0.
+func (r *Rule) MatchesSplitStateName(f *Fact) bool {
+	source, end := strings.CutSuffix(r.Name, ComponentSep+EndRuleSuffix)
+	return end && strings.HasPrefix(f.Name, SubtermName+ComponentSep+source+ComponentSep)
+}

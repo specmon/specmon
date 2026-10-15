@@ -210,7 +210,7 @@ func prioritizedReferenceApplications(
 			}
 		}
 
-		next, err := m.handleTriggers(config, event, entry.rule)
+		next, _, err := m.handleTriggers(config, event, entry.rule)
 		if err != nil {
 			return nil, err
 		}
@@ -246,7 +246,7 @@ func referenceContinuationAnchored(config *Config, event term.Term, r *rule.Rule
 	}
 
 	rawTriggers := r.Triggers()
-	triggerBinding, triggerErr := getUniqueBinding(rawTriggers, event)
+	triggerBinding, triggerErr := event.Unify(rawTriggers[0])
 
 	lhsPatterns := r.LHS
 	if triggerErr == nil {
@@ -264,8 +264,7 @@ func referenceContinuationAnchored(config *Config, event term.Term, r *rule.Rule
 			}
 			continue
 		}
-		instantiated := term.Terms(rawTriggers).Subst(lhsBinding)
-		if _, err := getUniqueBinding(instantiated, event); err == nil {
+		if _, err := event.Unify(rawTriggers[0].Subst(lhsBinding)); err == nil {
 			return true
 		}
 	}
@@ -658,19 +657,22 @@ func TestMultiTriggerReferenceBindsLHSBeforeEvaluatingTrigger(t *testing.T) {
 	})
 }
 
-func TestMultiTriggerReferenceRunsEpsilonAfterEveryTransition(t *testing.T) {
+// TestMultiTriggerReferenceRunsEpsilonAfterTransitions checks that the
+// epsilon step follows the start of a native multi-trigger application,
+// as it follows the corresponding transition of the hand-desugared rules,
+// and never runs before the reservation. Start and advance produce no
+// facts, so only epsilon candidates present before the start can fire.
+// The completion is itself an epsilon step. See
+// TestMultiTriggerCompletionIsEpsilonStep.
+func TestMultiTriggerReferenceRunsEpsilonAfterTransitions(t *testing.T) {
 	const (
 		reservedFactName   = "MultiEpsilonReserved"
 		stageZeroFactName  = "MultiEpsilonStageZero"
 		stageOneFactName   = "MultiEpsilonStageOne"
-		stageTwoFactName   = "MultiEpsilonStageTwo"
-		stageThreeFactName = "MultiEpsilonStageThree"
 		blockedFactName    = "MultiEpsilonBlocked"
 		finishedFactName   = "MultiEpsilonFinished"
 		originalActionName = "MultiEpsilonOriginalAction"
 		startActionName    = "MultiEpsilonStartAction"
-		advanceActionName  = "MultiEpsilonAdvanceAction"
-		finalActionName    = "MultiEpsilonFinalAction"
 		firstEventName     = "multiEpsilonFirst"
 		secondEventName    = "multiEpsilonSecond"
 		thirdEventName     = "multiEpsilonThird"
@@ -699,18 +701,6 @@ func TestMultiTriggerReferenceRunsEpsilonAfterEveryTransition(t *testing.T) {
 			[]*rule.Fact{rule.NewFact(stageOneFactName, nil, rule.LinearFact)},
 			[]*rule.Fact{rule.NewFact(startActionName, nil, rule.LinearFact)},
 		),
-		epsilonRule(
-			"MultiEpsilonAfterAdvance",
-			[]*rule.Fact{rule.NewFact(stageOneFactName, nil, rule.LinearFact)},
-			[]*rule.Fact{rule.NewFact(stageTwoFactName, nil, rule.LinearFact)},
-			[]*rule.Fact{rule.NewFact(advanceActionName, nil, rule.LinearFact)},
-		),
-		epsilonRule(
-			"MultiEpsilonAfterFinal",
-			[]*rule.Fact{rule.NewFact(stageTwoFactName, nil, rule.LinearFact)},
-			[]*rule.Fact{rule.NewFact(stageThreeFactName, nil, rule.LinearFact)},
-			[]*rule.Fact{rule.NewFact(finalActionName, nil, rule.LinearFact)},
-		),
 	}
 
 	runMultiTriggerReferenceScenario(t, multiTriggerReferenceScenario{
@@ -723,61 +713,122 @@ func TestMultiTriggerReferenceRunsEpsilonAfterEveryTransition(t *testing.T) {
 		},
 		wantReferenceActions: map[int][]string{
 			0: {startActionName + "()"},
-			1: {advanceActionName + "()"},
-			2: {originalActionName + "()\x1e" + finalActionName + "()"},
+			1: {},
+			2: {originalActionName + "()"},
+		},
+		wantReferenceConfigs: map[int][]string{
+			2: {factProjection(rule.NewFact(finishedFactName, nil, rule.LinearFact), rule.NewFact(stageOneFactName, nil, rule.LinearFact))},
 		},
 	})
 }
 
-func TestMultiTriggerReferenceIncludesHintBeforeStartActions(t *testing.T) {
+// TestMultiTriggerCompletionIsEpsilonStep checks that the completion of a
+// native multi-trigger application is the epsilon step of its last block,
+// as the end rule is for a split rule: no epsilon rule runs after it, and
+// an epsilon candidate left by it is an error.
+func TestMultiTriggerCompletionIsEpsilonStep(t *testing.T) {
+	t.Parallel()
+
+	const (
+		reservedFactName = "MultiCompletionReserved"
+		finishedFactName = "MultiCompletionFinished"
+		doneFactName     = "MultiCompletionDone"
+		firstEventName   = "multiCompletionFirst"
+		secondEventName  = "multiCompletionSecond"
+	)
+
+	unit := term.NewFunction(term.PairFunctionName, nil)
+	reserved := rule.NewFact(reservedFactName, nil, rule.LinearFact)
+	finished := rule.NewFact(finishedFactName, nil, rule.LinearFact)
+	native := triggerRule("MultiCompletion", []*rule.Fact{reserved}, []*rule.Fact{finished}, nil,
+		eventTerm(firstEventName, unit), eventTerm(secondEventName, unit))
+
+	after := epsilonRule("MultiCompletionAfter", []*rule.Fact{finished},
+		[]*rule.Fact{rule.NewFact(doneFactName, nil, rule.LinearFact)}, nil)
+	m := newEpsilonTestMonitor(t, native, after)
+	m.Configs()[0].AddFact(reserved)
+	if _, err := m.ProcessEvent(eventTerm(firstEventName, unit)); err != nil {
+		t.Fatalf("ProcessEvent(start): %v", err)
+	}
+	if _, err := m.ProcessEvent(eventTerm(secondEventName, unit)); !errors.Is(err, ErrEpsilonDepth) {
+		t.Fatalf("ProcessEvent(completion) error = %v, want ErrEpsilonDepth", err)
+	}
+}
+
+// TestHintContinuationUsesSingleTriggerRules checks that a hint
+// continuation consumes the event only with rules with a single trigger:
+// it neither starts nor advances a native multi-trigger application. The
+// hint candidate then has no continuation, which is an error.
+func TestHintContinuationUsesSingleTriggerRules(t *testing.T) {
+	t.Parallel()
+
 	const (
 		hintReadyFactName = "MultiHintReady"
+		hintDoneFactName  = "MultiHintDone"
 		resourceFactName  = "MultiHintResource"
-		stageFactName     = "MultiHintStage"
-		advancedFactName  = "MultiHintAdvanced"
 		finishedFactName  = "MultiHintFinished"
-		hintActionName    = "MultiHintAction"
-		epsilonActionName = "MultiHintEpsilonAction"
-		finalActionName   = "MultiHintFinalAction"
 		startEventName    = "multiHintStart"
 		finishEventName   = "multiHintFinish"
 	)
 
 	unit := term.NewFunction(term.PairFunctionName, nil)
 	startEvent := eventTerm(startEventName, unit)
-	native := triggerRule(
-		"MultiHint",
-		[]*rule.Fact{rule.NewFact(resourceFactName, nil, rule.LinearFact)},
-		[]*rule.Fact{rule.NewFact(finishedFactName, nil, rule.LinearFact)},
-		[]*rule.Fact{rule.NewFact(finalActionName, nil, rule.LinearFact)},
-		startEvent,
-		eventTerm(finishEventName, unit),
-	)
-	hint := &rule.Rule{
-		Name: "MultiHintSetup",
-		LHS:  []*rule.Fact{rule.NewFact(hintReadyFactName, nil, rule.LinearFact)},
-		RHS:  []*rule.Fact{rule.NewFact(resourceFactName, nil, rule.LinearFact)},
-		Act:  []*rule.Fact{rule.NewFact(hintActionName, nil, rule.LinearFact)},
-		Attrs: map[string]rule.Attribute{
-			rule.HintAttributeName: rule.TermAttribute{Value: []term.Term{startEvent}},
-		},
+	finishEvent := eventTerm(finishEventName, unit)
+	resource := rule.NewFact(resourceFactName, nil, rule.LinearFact)
+	hintReady := rule.NewFact(hintReadyFactName, nil, rule.LinearFact)
+	native := triggerRule("MultiHint", []*rule.Fact{resource},
+		[]*rule.Fact{rule.NewFact(finishedFactName, nil, rule.LinearFact)}, nil, startEvent, finishEvent)
+	hint := func(event term.Term, rhs *rule.Fact) *rule.Rule {
+		return &rule.Rule{
+			Name: "MultiHintSetup",
+			LHS:  []*rule.Fact{hintReady},
+			RHS:  []*rule.Fact{rhs},
+			Attrs: map[string]rule.Attribute{
+				rule.HintAttributeName: rule.TermAttribute{Value: []term.Term{event}},
+			},
+		}
 	}
-	epsilon := epsilonRule(
-		"MultiHintEpsilon",
-		[]*rule.Fact{rule.NewFact(stageFactName, nil, rule.LinearFact)},
-		[]*rule.Fact{rule.NewFact(advancedFactName, nil, rule.LinearFact)},
-		[]*rule.Fact{rule.NewFact(epsilonActionName, nil, rule.LinearFact)},
-	)
 
-	runMultiTriggerReferenceScenario(t, multiTriggerReferenceScenario{
-		nativeRules:  []*rule.Rule{native, hint, epsilon},
-		initialFacts: []*rule.Fact{rule.NewFact(hintReadyFactName, nil, rule.LinearFact), rule.NewFact(stageFactName, nil, rule.LinearFact)},
-		events:       []term.Term{startEvent, eventTerm(finishEventName, unit)},
-		wantReferenceActions: map[int][]string{
-			0: {hintActionName + "()\x1e" + epsilonActionName + "()"},
-			1: {finalActionName + "()"},
+	for _, test := range []struct {
+		name   string
+		hint   *rule.Rule
+		facts  []*rule.Fact
+		events []term.Term
+	}{
+		{
+			// The hint provides the resource that a start would reserve.
+			name:   "no start",
+			hint:   hint(startEvent, resource),
+			facts:  []*rule.Fact{hintReady},
+			events: []term.Term{startEvent},
 		},
-	})
+		{
+			// The application is started directly. The hint's
+			// continuation could complete it.
+			name:   "no advance",
+			hint:   hint(finishEvent, rule.NewFact(hintDoneFactName, nil, rule.LinearFact)),
+			facts:  []*rule.Fact{hintReady, resource},
+			events: []term.Term{startEvent, finishEvent},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			m := newEpsilonTestMonitor(t, native, test.hint)
+			for _, fact := range test.facts {
+				m.Configs()[0].AddFact(fact)
+			}
+			last := len(test.events) - 1
+			for _, event := range test.events[:last] {
+				if _, err := m.ProcessEvent(event); err != nil {
+					t.Fatalf("ProcessEvent(%s): %v", event, err)
+				}
+			}
+			_, err := m.ProcessEvent(test.events[last])
+			if !errors.Is(err, ErrNoApplicableRule) || !strings.Contains(err.Error(), "after accepting hint") {
+				t.Fatalf("ProcessEvent error = %v, want no continuation after the hint", err)
+			}
+		})
+	}
 }
 
 // TestMultiTriggerReferenceStartsAfterPremiseSubstitution checks starts

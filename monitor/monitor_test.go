@@ -833,6 +833,7 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 		triggerRuleName   = "TriggerEpsilonEvaluation"
 		epsilonRuleName   = "InvalidEpsilonEvaluation"
 		invalidFactName   = "InvalidEpsilonResult"
+		readyFactName     = "EpsilonEvaluationReady"
 	)
 
 	event := term.NewFunction(term.PairFunctionName, []term.Term{
@@ -841,6 +842,7 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 	})
 	triggerRule := &rule.Rule{
 		Name: triggerRuleName,
+		RHS:  []*rule.Fact{rule.NewFact(readyFactName, nil, rule.LinearFact)},
 		Attrs: map[string]rule.Attribute{
 			rule.TriggerAttributeName: rule.TermAttribute{Value: []term.Term{event}},
 		},
@@ -848,6 +850,7 @@ func TestProcessEventReturnsEpsilonEvaluationErrors(t *testing.T) {
 	invalid := term.NewFunction(term.AddFunctionName, []term.Term{term.NewConstant[int64](1)})
 	epsilonRule := &rule.Rule{
 		Name: epsilonRuleName,
+		LHS:  []*rule.Fact{rule.NewFact(readyFactName, nil, rule.LinearFact)},
 		RHS: []*rule.Fact{
 			rule.NewFact(invalidFactName, []term.Term{invalid}, rule.LinearFact),
 		},

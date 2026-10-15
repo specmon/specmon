@@ -1604,3 +1604,10 @@ func SplitPair(t Term) (Term, Term) {
 	}
 	return f.Args[0], f.Args[1]
 }
+
+// ContainsComputation reports whether t contains a function other than
+// a reserved constructor or evaluator.
+func ContainsComputation(t Term) bool {
+	fn, ok := t.(*Function)
+	return ok && fn != nil && (!ReservedNames.Contains(fn.Name) || slices.ContainsFunc(fn.Args, ContainsComputation))
+}

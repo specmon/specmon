@@ -470,3 +470,34 @@ func (r Rules) FilterByDecomp() Rules {
 
 	return rules
 }
+
+// IsEpsilon reports whether the rule has neither triggers nor hints.
+func (r *Rule) IsEpsilon() bool {
+	return !r.HasTriggers() && !r.HasHints()
+}
+
+// HasComputation reports whether the conclusions or actions of r contain a
+// computation, that is a function other than a reserved constructor or
+// evaluator. The outer call of the event that a PPEvent action emits names
+// that event and is no computation.
+func (r *Rule) HasComputation() bool {
+	for _, f := range slices.Concat(r.RHS, r.Act) {
+		args := f.Args
+		if output := f.RewriteTerm(); output != nil {
+			args = nil
+			event, result := term.SplitPair(output)
+			if event == nil {
+				event = output
+			} else {
+				args = append(args, result)
+			}
+			if fn, ok := event.(*term.Function); ok && fn != nil {
+				args = append(args, fn.Args...)
+			}
+		}
+		if slices.ContainsFunc(args, term.ContainsComputation) {
+			return true
+		}
+	}
+	return false
+}
