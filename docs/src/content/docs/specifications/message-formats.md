@@ -43,6 +43,8 @@ macros:
 #endif
 ```
 
+The head of a macro is a function of distinct variables, its parameters. SpecMon rejects any other head when it loads the model. An application of the macro is replaced by its body, with each parameter replaced by the corresponding argument. A variable of the body that is not a parameter keeps its name.
+
 During **verification**, Tamarin sees `handshake(x, y, z)` as an abstract tuple `<x, y, z>` and reasons symbolically about its contents.
 
 During **monitoring**, SpecMon uses the format string to:

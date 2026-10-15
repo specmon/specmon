@@ -43,6 +43,48 @@ func parseRule(t *testing.T, conclusion string) ([]*rule.Rule, error) {
 	return parser.ParseFile(context.Background(), path, nil)
 }
 
+// TestParseMacroParametersAreLocal checks that the parameters of a macro do
+// not capture variables of the same names in the rule that applies it, and
+// that a macro head must be a function of distinct variables.
+func TestParseMacroParametersAreLocal(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, macro, conclusion, want string
+	}{
+		{"swapped names", "m(x, y) = cat(byte(x), byte(y))", "Next(m(y, x))", "cat(byte(y), byte(x))"},
+		{"name inside an argument", "m(x) = cat(byte(x))", "Next(m(h(x)))", "cat(byte(h(x)))"},
+		{"nested application", "m(x, y) = <x, y>", "Next(m(m(y, x), x))", "<<y, x>, x>"},
+		{"repeated parameter", "m(x, x) = cat(byte(x))", "Next(m(y, x))", ""},
+		{"constant parameter", "m(x, '1') = cat(byte(x))", "Next(m(y, '1'))", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			source := fmt.Sprintf("theory T\nbegin\n\nmacros: %s\n\nrule R:\n  [ State(x, y) ]\n  -->\n  [ %s ]\n\nend\n", test.macro, test.conclusion)
+			path := filepath.Join(t.TempDir(), "macro.spthy")
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatalf("write specification: %v", err)
+			}
+			rules, err := parser.ParseFile(context.Background(), path, nil)
+			if test.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "the parameters must be distinct variables") {
+					t.Fatalf("ParseFile error = %v, want an invalid macro head", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseFile: %v", err)
+			}
+			if len(rules) != 1 || len(rules[0].RHS) != 1 || len(rules[0].RHS[0].Args) != 1 {
+				t.Fatalf("unexpected parsed rules: %v", rules)
+			}
+			if got := rules[0].RHS[0].Args[0].String(); got != test.want {
+				t.Fatalf("expanded macro = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParseConstructSideXorAndNot(t *testing.T) {
 	t.Parallel()
 

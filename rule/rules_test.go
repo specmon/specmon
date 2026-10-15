@@ -304,3 +304,18 @@ func BenchmarkRuleReplaceFormats(b *testing.B) {
 		benchmarkRuleSubstSink = replaced
 	}
 }
+
+func TestMacroSubstitutionBeforeUnification(t *testing.T) {
+	parameter := term.NewVariable("x")
+	head := term.NewFunction("m", []term.Term{parameter})
+	body := term.NewFunction("cat", []term.Term{term.NewFunction("byte", []term.Term{parameter})})
+	macros := term.NewBinding()
+	macros.Set(head, body)
+	application := term.NewFunction("m", []term.Term{term.NewFunction("h", []term.Term{term.NewVariable("x")})})
+	facts := rule.Facts{rule.NewFact("Next", []term.Term{application}, rule.LinearFact)}
+	got := facts.ExpandFacts(macros)[0].Args[0].String()
+	t.Logf("expanded = %s", got)
+	if got != "cat(byte(h(x)))" {
+		t.Fatalf("macro did not substitute its parameter: %s", got)
+	}
+}

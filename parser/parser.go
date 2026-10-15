@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -498,10 +499,31 @@ func (p *Parser) parseMacros(n *sitter.Node) *term.Binding {
 			continue
 		}
 
-		b.Set(p.parseTerm(left), p.parseTerm(right))
+		head := p.parseTerm(left)
+		if !isMacroHead(head) && p.semanticErr == nil {
+			start := left.StartPosition()
+			p.semanticErr = fmt.Errorf("%s:%d:%d: macro %s: the parameters must be distinct variables", p.srcFile, start.Row+1, start.Column+1, head)
+		}
+		b.Set(head, p.parseTerm(right))
 	}
 
 	return b
+}
+
+// isMacroHead reports whether t is a function whose arguments are distinct
+// variables, the parameters that an application of the macro replaces.
+func isMacroHead(t term.Term) bool {
+	f, ok := t.(*term.Function)
+	if !ok {
+		return false
+	}
+	for i, arg := range f.Args {
+		v, ok := arg.(*term.Variable)
+		if !ok || slices.ContainsFunc(f.Args[:i], v.Equal) {
+			return false
+		}
+	}
+	return true
 }
 
 // parseIntLiteral returns text as an integer constant, or nil if it is not
