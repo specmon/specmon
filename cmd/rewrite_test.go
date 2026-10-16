@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,60 @@ func TestRewriteKeepsOutputCall(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(rewriteOutputTestWant, "\n") {
 		t.Fatalf("rewritten events:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(rewriteOutputTestWant, "\n"))
+	}
+}
+
+func TestMacroAnnotationMatching(t *testing.T) {
+	const macros = "macros: packet(x) = cat(byte(x, '1'))\n"
+	const trigger = "<recv(packet(x)), packet(y)>"
+	for _, hinted := range []bool{false, true} {
+		rules := macros + "rule Receive [trigger=[" + trigger + "]]: [] --[ PPEvent(<parsed(x), y>) ]-> []"
+		prefix := ""
+		if hinted {
+			rules = macros + "rule Setup [trigger=[<setup(), <>>]]: [] --> [ Ready() ]\n" +
+				"rule Start [hint=[" + trigger + "]]: [ Ready() ] --> [ Pending(x, y) ]\n" +
+				"rule Receive [trigger=[" + trigger + "]]: [ Pending(x, y) ] --[ PPEvent(<parsed(x), y>) ]-> []"
+			prefix = rewriteTestEventLine(t, "setup", rewriteTestEmpty)
+		}
+		input := prefix + rewriteTestEventLine(t, "recv", term.NewConstant([]byte{2}), 1)
+		t.Run(fmt.Sprintf("hint=%t", hinted), func(t *testing.T) {
+			t.Run("rewrite", func(t *testing.T) {
+				got, err := runRewriteTest(t, rules, input)
+				if err != nil || strings.Join(got, "\n") != "<parsed(0x01), 0x02>" {
+					t.Fatalf("rewrite = %v, %v; want <parsed(0x01), 0x02>", got, err)
+				}
+			})
+			t.Run("short result", func(t *testing.T) {
+				got, err := runRewriteTest(t, rules, prefix+rewriteTestEventLine(t, "recv", term.NewConstant([]byte{}), 1))
+				if len(got) != 0 || !errors.Is(err, monitor.ErrNoApplicableRule) {
+					t.Fatalf("rewrite = %v, %v; want a rejected event without output", got, err)
+				}
+			})
+			for _, integrated := range []bool{false, true} {
+				t.Run(fmt.Sprintf("monitor integrated=%t", integrated), func(t *testing.T) {
+					path := writeMonitorSpec(t, rules)
+					config := MonitorConfig{In: writeMonitorInput(t, []byte(input))}
+					if integrated {
+						config.RewriteWith = path
+						path = writeMonitorSpec(t, macros+"rule Consume [trigger=[<parsed(packet(x)), packet(y)>]]: [] --> []")
+					}
+					command := monitorTestCommand()
+					if err := config.RunE(command, []string{path}); err != nil {
+						t.Fatalf("monitor: %v", err)
+					}
+					want := "1: <recv(0x01), 0x02>"
+					if hinted {
+						want = "2: <recv(0x01), 0x02>"
+					}
+					if integrated {
+						want = "1: <parsed(0x01), 0x02>"
+					}
+					if got := command.OutOrStdout().(*bytes.Buffer).String(); !strings.Contains(got, want) {
+						t.Fatalf("monitor output = %s, want %s", got, want)
+					}
+				})
+			}
+		})
 	}
 }
 

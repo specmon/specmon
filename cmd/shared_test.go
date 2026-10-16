@@ -57,6 +57,20 @@ end
 	}
 }
 
+func TestMacroAnnotationAdmission(t *testing.T) {
+	for _, attribute := range []string{"trigger", "hint"} {
+		t.Run(attribute, func(t *testing.T) {
+			path := writeMonitorSpec(t, fmt.Sprintf(`macros: bad(x) = not(x, x)
+rule R [%s=[<recv(bad(x)), r>]]: [ State(x) ] --> []`, attribute))
+			config := MonitorConfig{In: writeMonitorInput(t, nil)}
+			err := config.RunE(monitorTestCommand(), []string{path})
+			if err == nil || !strings.Contains(err.Error(), "not(x, x) has 2 arguments, want 1") {
+				t.Fatalf("monitor load = %v, want the expanded macro's arity error", err)
+			}
+		})
+	}
+}
+
 type failingListener struct {
 	err error
 }

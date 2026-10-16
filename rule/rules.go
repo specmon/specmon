@@ -340,8 +340,7 @@ func ReadRules(filename string) []Rule {
 	return rules
 }
 
-// ExpandFormats expands all format terms in a rule.
-// Formats are not expanded in rule attributes.
+// ExpandFormats expands macros in facts and term-valued rule attributes.
 func (r *Rule) ExpandFormats(b *term.Binding) *Rule {
 	if b.Empty() {
 		return r
@@ -358,8 +357,50 @@ func (r *Rule) ExpandFormats(b *term.Binding) *Rule {
 	s.LHS = Facts(r.LHS).ExpandFacts(b)
 	s.Act = Facts(r.Act).ExpandFacts(b)
 	s.RHS = Facts(r.RHS).ExpandFacts(b)
+	for name, attr := range r.Attrs {
+		if terms, ok := attr.(TermAttribute); ok {
+			s.Attrs[name] = TermAttribute{Value: expandMacros(terms.Value, b)}
+		}
+	}
 
 	return s
+}
+
+// expandMacros applies the existing macro pass to a new slice of terms.
+func expandMacros(terms []term.Term, b *term.Binding) []term.Term {
+	expanded := slices.Clone(terms)
+	for i := range expanded {
+		b.Iterate(func(k, v term.Term) bool {
+			if head, ok := k.(*term.Function); ok {
+				expanded[i] = expandMacro(expanded[i], head, v)
+			}
+			return true
+		})
+	}
+	return expanded
+}
+
+// expandMacro replaces every application of the macro with the given head
+// in t by its body, with the parameters of the head, distinct variables,
+// replaced by the arguments of the application. Only the parameters are
+// substituted. A variable of the body that is not a parameter keeps its name.
+func expandMacro(t term.Term, head *term.Function, body term.Term) term.Term {
+	f, ok := t.(*term.Function)
+	if !ok {
+		return t
+	}
+	args := make([]term.Term, len(f.Args))
+	for i, arg := range f.Args {
+		args[i] = expandMacro(arg, head, body)
+	}
+	if f.Name != head.Name || len(args) != len(head.Args) {
+		return term.NewFunction(f.Name, args)
+	}
+	parameters := term.NewBinding()
+	for i, parameter := range head.Args {
+		parameters.Set(parameter, args[i])
+	}
+	return term.SubstBinding(parameters, body)
 }
 
 func (r *Rule) ReplaceFormats() (*Rule, error) {

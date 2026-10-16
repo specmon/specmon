@@ -320,6 +320,30 @@ func TestMacroSubstitutionBeforeUnification(t *testing.T) {
 	}
 }
 
+func TestExpandFormatsDoesNotMutateAnnotations(t *testing.T) {
+	x := term.NewVariable("x")
+	call := term.NewFunction("m", []term.Term{x})
+	macros := term.NewBinding()
+	macros.Set(call, term.NewFunction("h", []term.Term{x}))
+	shared := []term.Term{call}
+	original := rule.NewRule()
+	original.Attrs[rule.TriggerAttributeName] = rule.TermAttribute{Value: shared}
+	original.Attrs[rule.HintAttributeName] = rule.TermAttribute{Value: shared}
+	expanded := original.ExpandFormats(macros)
+	for _, name := range []string{rule.TriggerAttributeName, rule.HintAttributeName} {
+		if got := expanded.Attrs[name].GetTerms()[0].String(); got != "h(x)" {
+			t.Fatalf("expanded %s = %s, want h(x)", name, got)
+		}
+		expanded.Attrs[name].GetTerms()[0] = term.NewVariable("changed")
+		if got := original.Attrs[name].GetTerms()[0].String(); got != "m(x)" {
+			t.Fatalf("original %s changed to %s", name, got)
+		}
+	}
+	if got := call.String(); got != "m(x)" {
+		t.Fatalf("shared term changed to %s", got)
+	}
+}
+
 func TestFactEqualityKindAndCoercion(t *testing.T) {
 	a := term.NewConstant("ab")
 	linear := rule.NewFact("State", []term.Term{a}, rule.LinearFact)

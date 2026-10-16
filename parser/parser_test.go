@@ -85,6 +85,49 @@ func TestParseMacroParametersAreLocal(t *testing.T) {
 	}
 }
 
+func TestParseMacrosInAnnotations(t *testing.T) {
+	t.Parallel()
+
+	for _, attribute := range []string{rule.TriggerAttributeName, rule.HintAttributeName} {
+		for _, test := range []struct {
+			name, macro, annotation, let, want string
+		}{
+			{"argument", "m(x) = cat(byte(x))", "<recv(m(x)), r>", "", "<recv(cat(byte(x))), r>"},
+			{"result", "m(x) = cat(byte(x))", "<recv(x), m(y)>", "", "<recv(x), cat(byte(y))>"},
+			{"nested", "m(x, y) = <x, y>", "<recv(m(m(y, x), x)), r>", "", "<recv(<<y, x>, x>), r>"},
+			{"swapped parameters", "m(x, y) = <x, y>", "<recv(m(y, x)), r>", "", "<recv(<y, x>), r>"},
+			{"free variable", "m(x) = <x, z>", "<recv(m(y)), r>", "", "<recv(<y, z>), r>"},
+			{"whole event", "m(x, y) = <recv(x), y>", "m(x, r)", "", "<recv(x), r>"},
+			{"call", "m(x) = recv(x)", "<m(x), r>", "", "<recv(x), r>"},
+			{"let binding", "m(x) = cat(byte(x))", "<recv(payload), r>", "let payload = m(x) in", "<recv(cat(byte(x))), r>"},
+			{"multiple events", "m(x) = cat(byte(x))", "<recv(m(x)), r>, <send(m(y)), r>", "", "<recv(cat(byte(x))), r>, <send(cat(byte(y))), r>"},
+			{"different arity", "m(x) = cat(byte(x))", "<recv(m(x, y)), r>", "", "<recv(m(x, y)), r>"},
+		} {
+			t.Run(attribute+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
+				source := fmt.Sprintf("theory T\nbegin\nmacros: %s\nrule R [%s=[%s], role=\"client\"]:\n%s\n[ State(x, y) ] --> []\nend\n", test.macro, attribute, test.annotation, test.let)
+				path := filepath.Join(t.TempDir(), "macro.spthy")
+				if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				rules, err := parser.ParseFile(context.Background(), path, nil)
+				if err != nil {
+					t.Fatalf("ParseFile: %v", err)
+				}
+				if len(rules) != 1 {
+					t.Fatalf("parsed %d rules, want 1", len(rules))
+				}
+				if got := rules[0].Attrs[attribute].String(); got != "["+test.want+"]" {
+					t.Fatalf("%s = %s, want [%s]", attribute, got, test.want)
+				}
+				if got := rules[0].Role(); got != "client" {
+					t.Fatalf("role = %q, want unchanged string attribute", got)
+				}
+			})
+		}
+	}
+}
+
 func TestParseConstructSideXorAndNot(t *testing.T) {
 	t.Parallel()
 

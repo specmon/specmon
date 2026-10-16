@@ -45,6 +45,8 @@ macros:
 
 The head of a macro is a function of distinct variables, its parameters. SpecMon rejects any other head when it loads the model. An application of the macro is replaced by its body, with each parameter replaced by the corresponding argument. A variable of the body that is not a parameter keeps its name.
 
+Macros expand in fact arguments and throughout `trigger` and `hint` terms, including their call arguments and result patterns. Expansion happens before rule checks and decomposition. For example, `trigger=[<recv(handshake(sender, key, payload)), result>]` matches the byte layout defined by `handshake` in the monitoring view. A macro that names an entire call or event expands there as well. String attributes such as `role` are unchanged.
+
 During **verification**, Tamarin sees `handshake(x, y, z)` as an abstract tuple `<x, y, z>` and reasons symbolically about its contents.
 
 During **monitoring**, SpecMon uses the format string to:

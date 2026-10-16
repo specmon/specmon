@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -278,43 +277,10 @@ func (f Facts) HasFunctions() bool {
 func (f Facts) ExpandFacts(b *term.Binding) []*Fact {
 	newFacts := make([]*Fact, len(f))
 	for i, fact := range f {
-		args := slices.Clone(fact.Args)
-		for j := range args {
-			b.Iterate(func(k, v term.Term) bool {
-				if head, ok := k.(*term.Function); ok {
-					args[j] = expandMacro(args[j], head, v)
-				}
-
-				return true
-			})
-		}
-		newFacts[i] = NewFact(fact.Name, args, fact.Type)
+		newFacts[i] = NewFact(fact.Name, expandMacros(fact.Args, b), fact.Type)
 	}
 
 	return newFacts
-}
-
-// expandMacro replaces every application of the macro with the given head
-// in t by its body, with the parameters of the head, distinct variables,
-// replaced by the arguments of the application. Only the parameters are
-// substituted. A variable of the body that is not a parameter keeps its name.
-func expandMacro(t term.Term, head *term.Function, body term.Term) term.Term {
-	f, ok := t.(*term.Function)
-	if !ok {
-		return t
-	}
-	args := make([]term.Term, len(f.Args))
-	for i, arg := range f.Args {
-		args[i] = expandMacro(arg, head, body)
-	}
-	if f.Name != head.Name || len(args) != len(head.Args) {
-		return term.NewFunction(f.Name, args)
-	}
-	parameters := term.NewBinding()
-	for i, parameter := range head.Args {
-		parameters.Set(parameter, args[i])
-	}
-	return term.SubstBinding(parameters, body)
 }
 
 // RewriteTerm returns the sole argument of a rewrite action, or nil for
