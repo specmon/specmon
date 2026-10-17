@@ -21,5 +21,14 @@
   },
   "devDependencies": {
     "wrangler": "^4.142.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "sharp@<0.35.5": "0.35.5",
+      "source-map-js@<1.2.2": "1.2.2",
+      "postcss-selector-parser@<7.1.6": "7.1.6",
+      "http-cache-semantics@<=4.2.0": "4.3.0",
+      "undici@>=7.0.0 <7.29.1": "7.29.1"
+    }
   }
 }
