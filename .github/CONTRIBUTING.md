@@ -80,6 +80,14 @@ This provides all dependencies and tools automatically.
 SpecMon uses [Release Please](https://github.com/googleapis/release-please) and
 [GoReleaser](https://goreleaser.com) for automated releases.
 
+### Compatibility and breaking changes
+
+The Go packages do not provide a stable API before 1.0. Breaking-change notices
+cover incompatible changes to CLI commands and output, the model language and
+its load checks, event formats, and the violation-hook payload. Mark these
+changes with `!` in the commit title and describe the incompatibility in a
+`BREAKING-CHANGE:` footer.
+
 ### How the pipeline works
 
 1. Every push to `develop` triggers the Release Please workflow. It reads commit
