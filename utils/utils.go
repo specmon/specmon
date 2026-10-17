@@ -93,8 +93,18 @@ func BytesToInt(b []byte, order binary.ByteOrder) (int64, error) {
 		return 0, fmt.Errorf("byte slice too long to convert to int64: %d", len(b))
 	}
 
-	padded := PadWithByteOrder(b, order, 8)
-	value := order.Uint64(padded)
+	var padded [8]byte
+	var value uint64
+	switch order {
+	case binary.LittleEndian:
+		copy(padded[:], b)
+		value = binary.LittleEndian.Uint64(padded[:])
+	case binary.BigEndian:
+		copy(padded[8-len(b):], b)
+		value = binary.BigEndian.Uint64(padded[:])
+	default:
+		value = order.Uint64(PadWithByteOrder(b, order, 8))
+	}
 	if value > math.MaxInt64 {
 		return 0, fmt.Errorf("byte magnitude exceeds int64: %d", value)
 	}
