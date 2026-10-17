@@ -311,6 +311,11 @@ func TestPremiseCandidatesMatchPremisesFirst(t *testing.T) {
 		sameNameVars[i], sameNameValues[i] = term.NewVariable("x"+strconv.Itoa(i)), failureInt(int64(i))
 		sameName[i], sameNameFacts[i] = linearFact("P", sameNameVars[i]), linearFact("P", sameNameValues[i])
 	}
+	message := term.NewFunction(term.CatFunctionName, []term.Term{
+		term.NewFunction("int", []term.Term{x, failureInt(8)}),
+		term.NewFunction("string", []term.Term{y, x}),
+		term.NewFunction("byte", []term.Term{z}),
+	})
 
 	for _, test := range []struct {
 		name    string
@@ -343,6 +348,30 @@ func TestPremiseCandidatesMatchPremisesFirst(t *testing.T) {
 			name: "premises of one name", facts: sameNameFacts, body: sameName,
 			trigger: use(term.NewFunction("all", sameNameVars)), event: use(term.NewFunction("all", sameNameValues)), most: 1,
 		},
+		{
+			name: "short bytes encoded by an integer annotation",
+			facts: []*rule.Fact{
+				linearFact("P", term.NewConstant([]byte{1})),
+				linearFact("P", term.NewConstant([]byte{1, 0})),
+				linearFact("P", failureInt(1)),
+				linearFact("P", term.NewConstant([]byte{1, 0, 0, 0, 0, 0, 0, 0, 0})),
+			},
+			body: []*rule.Fact{linearFact("P", x)},
+			trigger: use(term.NewFunction(term.CatFunctionName, []term.Term{
+				term.NewFunction("int", []term.Term{x, term.NewConstant[int64](1)}),
+			})),
+			event: use(term.NewConstant([]byte{1})), most: 3,
+		},
+		{
+			name: "formatted message prefix",
+			facts: []*rule.Fact{
+				linearFact("P", term.NewConstant([]byte{2, 0, 0, 0, 0, 0, 0, 0, 'a', 'b', 9})),
+				linearFact("P", term.NewConstant([]byte{2, 0, 0, 0, 0, 0, 0, 0, 'a', 'c', 9})),
+			},
+			body:    []*rule.Fact{linearFact("P", message)},
+			trigger: use(term.NewFunction("inputs", []term.Term{x, y})),
+			event:   use(term.NewFunction("inputs", []term.Term{failureInt(2), str("ab")})), most: 1,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -365,4 +394,239 @@ func TestPremiseCandidatesMatchPremisesFirst(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A formatted annotation can convert a short byte value to an integer.
+// Its direct match then binds the canonical integer, whose eight bytes
+// differ from the premise value. Narrowing must retain the premise value.
+func TestFormattedNarrowingPreservesShortIntegerBytes(t *testing.T) {
+	x := term.NewVariable("x")
+	cat := func(kind string, args ...term.Term) term.Term {
+		return term.NewFunction(term.CatFunctionName, []term.Term{term.NewFunction(kind, args)})
+	}
+	c := NewConfig()
+	c.AddFact(linearFact("P", term.NewConstant([]byte{1})))
+	r := triggerRule("ShortInteger", []*rule.Fact{linearFact("P", cat("byte", x))}, nil, nil,
+		eventTerm("use", cat("int", x, term.NewConstant[int64](1))))
+	event := eventTerm("use", term.NewConstant([]byte{1}))
+	u, err := event.Unify(r.Triggers()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want, got []string
+	for _, b := range conflictSetFactsForConfig(c, r.LHS).Values() {
+		if _, err := event.Unify(r.Triggers()[0].Subst(b)); err == nil {
+			want = append(want, b.String())
+		}
+	}
+	for _, b := range premiseCandidates(c, r, u, nil).Values() {
+		if _, err := event.Unify(r.Triggers()[0].Subst(b)); err == nil {
+			got = append(got, b.String())
+		}
+	}
+	if len(want) != 1 || !slices.Equal(got, want) {
+		t.Fatalf("narrowed bindings = %v, want %v", got, want)
+	}
+}
+
+func TestFormattedAnnotationKeepsShortBytePremise(t *testing.T) {
+	for _, hint := range []bool{false, true} {
+		t.Run(strconv.FormatBool(hint), func(t *testing.T) {
+			x := term.NewVariable("x")
+			seed := triggerRule("Seed", nil, []*rule.Fact{linearFact("State", x)}, nil, eventTerm("seed", x))
+			call := eventTerm("use", term.NewFunction(term.CatFunctionName, []term.Term{
+				term.NewFunction("int", []term.Term{x, failureInt(1)}),
+			}))
+			body := []*rule.Fact{linearFact("State", x)}
+			rules := []*rule.Rule{seed}
+			if hint {
+				rules = append(rules, hintRule("Hint", body, []*rule.Fact{linearFact("Hinted", x)}, nil, call))
+				body = []*rule.Fact{linearFact("Hinted", x)}
+			}
+			rules = append(rules, triggerRule("Use", body, []*rule.Fact{linearFact("Done", x)}, nil, call))
+			m := newEpsilonTestMonitor(t, rules...)
+			value := term.NewConstant([]byte{1})
+			for _, event := range []term.Term{eventTerm("seed", value), eventTerm("use", value)} {
+				if _, err := m.ProcessEvent(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var got []string
+			for _, c := range m.Configs() {
+				for _, f := range c.Facts() {
+					got = append(got, f.String())
+				}
+			}
+			if !slices.Equal(got, []string{"Done(0x01)"}) {
+				t.Fatalf("facts = %v, want the original short byte value", got)
+			}
+		})
+	}
+}
+
+// P binds x to short bytes before Value compares its string bytewise.
+// An integer annotation instead parses x as int64. Narrowing must keep
+// Value even though that fact cannot itself supply an integer binding.
+func TestFormattedAnnotationKeepsSharedStringFact(t *testing.T) {
+	for _, prefix := range []bool{false, true} {
+		for _, mode := range []string{"trigger", "hint", "multi-use-first", "multi-ack-first"} {
+			t.Run(mode+"/prefix="+strconv.FormatBool(prefix), func(t *testing.T) {
+				x, y, n := term.NewVariable("x"), term.NewVariable("y"), term.NewVariable("n")
+				format := func(kind string) term.Term {
+					var fields []term.Term
+					if prefix {
+						fields = append(fields, term.NewFunction("int", []term.Term{n, failureInt(1)}))
+					}
+					fields = append(fields, term.NewFunction(kind, []term.Term{x, failureInt(1)}))
+					return term.NewFunction(term.CatFunctionName, fields)
+				}
+				seed := triggerRule("Seed", nil,
+					[]*rule.Fact{linearFact("P", y), linearFact("Value", x)}, nil,
+					eventTerm("seed", term.NewFunction("pair", []term.Term{x, y})))
+				body := []*rule.Fact{linearFact("P", format("byte")), linearFact("Value", x)}
+				call := eventTerm("use", format("int"))
+				ack := eventTerm("ack", failureInt(0))
+				rules := []*rule.Rule{seed}
+				if mode == "hint" {
+					hinted := linearFact("Hinted", x)
+					if prefix {
+						hinted = linearFact("Hinted", n, x)
+					}
+					rules = append(rules, hintRule("Hint", body, []*rule.Fact{hinted}, nil, call))
+					body = []*rule.Fact{hinted}
+				}
+				triggers := []term.Term{call}
+				if mode == "multi-use-first" || mode == "multi-ack-first" {
+					triggers = append(triggers, ack)
+				}
+				rules = append(rules, triggerRule("Use", body, []*rule.Fact{linearFact("Done", x)}, nil, triggers...))
+				m := newEpsilonTestMonitor(t, rules...)
+				payload := []byte{0x61}
+				if prefix {
+					payload = append([]byte{5}, payload...)
+				}
+				value := term.NewConstant(payload)
+				events := []term.Term{eventTerm("seed", term.NewFunction("pair", []term.Term{term.NewConstant("a"), value}))}
+				if mode == "multi-ack-first" {
+					events = append(events, ack)
+				}
+				events = append(events, eventTerm("use", value))
+				if mode == "multi-use-first" {
+					events = append(events, ack)
+				}
+				for _, event := range events {
+					if _, err := m.ProcessEvent(event); err != nil {
+						t.Fatalf("event %s: %v", event, err)
+					}
+				}
+				var got []string
+				for _, c := range m.Configs() {
+					for _, f := range c.Facts() {
+						got = append(got, f.String())
+					}
+				}
+				if !slices.Equal(got, []string{"Done(0x61)"}) {
+					t.Fatalf("facts = %v, want the byte binding from P", got)
+				}
+			})
+		}
+	}
+}
+
+// Compare narrowing with full premise-first matching across field widths,
+// constant types, unknown suffixes and variables already bound by another
+// premise. Construct events from actual premise matches, so every tested
+// event has an accepted reference path even when the direct annotation
+// match gives another representation of its variables.
+func TestFormattedNarrowingMatchesPremisesFirst(t *testing.T) {
+	x, y := term.NewVariable("x"), term.NewVariable("y")
+	values := []term.Term{
+		term.NewConstant[int64](0), term.NewConstant[int64](1), term.NewConstant[int64](255),
+		term.NewConstant([]byte{}), term.NewConstant([]byte{0}), term.NewConstant([]byte{1}),
+		term.NewConstant([]byte{1, 0}), term.NewConstant([]byte{1, 0, 0, 0, 0, 0, 0, 0}),
+		term.NewConstant(""), term.NewConstant("a"), term.NewConstant("ab"), term.NewConstant("é"),
+	}
+	format := func(kind string, width int64, prefix, suffix bool) term.Term {
+		var fields []term.Term
+		if prefix {
+			fields = append(fields, term.NewFunction("byte", []term.Term{term.NewConstant([]byte{2})}))
+		}
+		args := []term.Term{x}
+		if width >= 0 {
+			args = append(args, term.NewConstant(width))
+		}
+		fields = append(fields, term.NewFunction(kind, args))
+		if suffix {
+			fields = append(fields, term.NewFunction("byte", []term.Term{y}))
+		}
+		return term.NewFunction(term.CatFunctionName, fields)
+	}
+	matched := func(r *rule.Rule, event term.Term, candidates *bindingSet) []string {
+		var result []string
+		for _, b := range candidates.Values() {
+			if _, err := event.Unify(r.Triggers()[0].Subst(b)); err == nil {
+				result = append(result, b.String())
+			}
+		}
+		return result
+	}
+	formats := func(surround bool) []term.Term {
+		var result []term.Term
+		for _, kind := range []string{"byte", "int", "string"} {
+			for _, width := range []int64{-1, 0, 1, 2, 8} {
+				result = append(result, format(kind, width, false, false))
+				if surround {
+					result = append(result, format(kind, width, true, false),
+						format(kind, width, false, true), format(kind, width, true, true))
+				}
+			}
+		}
+		return result
+	}
+	annotations := formats(false)
+	checked := 0
+	for _, pattern := range formats(true) {
+		for _, value := range values {
+			seed := term.BindingFromMap(map[term.Term]term.Term{x: value, y: term.NewConstant([]byte{7})})
+			payload, err := term.Evaluate(pattern.Subst(seed))
+			if err != nil {
+				continue
+			}
+			for _, boundFirst := range []bool{false, true} {
+				c := NewConfig()
+				c.AddFact(linearFact("P", payload))
+				body := []*rule.Fact{linearFact("P", pattern)}
+				if boundFirst {
+					c.AddFact(linearFact("Value", value))
+					body = append([]*rule.Fact{linearFact("Value", x)}, body...)
+				}
+				full := conflictSetFactsForConfig(c, body)
+				for _, annotation := range annotations {
+					trigger := eventTerm("use", annotation)
+					r := triggerRule("FormatReference", body, nil, nil, trigger)
+					for _, b := range full.Values() {
+						event, err := term.Evaluate(trigger.Subst(b))
+						if err != nil {
+							continue
+						}
+						u, err := event.Unify(trigger)
+						if err != nil {
+							continue
+						}
+						want := matched(r, event, full)
+						got := matched(r, event, premiseCandidates(c, r, u, nil))
+						if !slices.Equal(got, want) {
+							t.Fatalf("pattern %s, trigger %s, payload %s, first %t, value %s: got %v, want %v",
+								pattern, trigger, payload, boundFirst, value, got, want)
+						}
+						checked++
+					}
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no reference paths checked")
+	}
+	t.Logf("checked %d accepted reference paths", checked)
 }

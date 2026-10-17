@@ -19,6 +19,8 @@
 package monitor
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math"
 	"slices"
 	"sort"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/specmon/specmon/rule"
 	"github.com/specmon/specmon/term"
+	"github.com/specmon/specmon/utils"
 )
 
 type conflictKey struct {
@@ -515,6 +518,12 @@ func conflictSetFactsForConfig(c *Config, body []*rule.Fact) *bindingSet {
 // restricted to these candidates, so every premise variable takes the value
 // of its fact, as when the premises are matched first.
 func conflictSetFactsNarrowed(c *Config, body, narrowed []*rule.Fact) *bindingSet {
+	var formats []formatFilter
+	for i, p := range narrowed {
+		for j, arg := range p.Args {
+			formats = appendFormatFilters(formats, body[i].Args[j], arg)
+		}
+	}
 	var items []*rule.Fact
 	for i, p := range body {
 		if slices.ContainsFunc(body[:i], func(q *rule.Fact) bool { return q.Name == p.Name }) {
@@ -529,7 +538,7 @@ func conflictSetFactsNarrowed(c *Config, body, narrowed []*rule.Fact) *bindingSe
 		}
 		for _, e := range c.factsByName[p.Name].entries {
 			for _, j := range same {
-				if mayMatchArgs(narrowed[j].Args, e.fact.Args) {
+				if mayMatchArgs(narrowed[j].Args, e.fact.Args, formats) {
 					for range min(e.count, len(same)) {
 						items = append(items, e.fact)
 					}
@@ -540,7 +549,7 @@ func conflictSetFactsNarrowed(c *Config, body, narrowed []*rule.Fact) *bindingSe
 	}
 	return conflictSet(items, body,
 		&narrowing{
-			slot:   func(i int, f *rule.Fact) bool { return mayMatchArgs(narrowed[i].Args, f.Args) },
+			slot:   func(i int, f *rule.Fact) bool { return mayMatchArgs(narrowed[i].Args, f.Args, formats) },
 			counts: candidateCounts(c, body),
 		},
 	)
@@ -574,34 +583,113 @@ func candidateCounts(c *Config, body []*rule.Fact) []int {
 	return counts
 }
 
-// mayMatchArgs reports whether the pattern arguments may match the ground
-// arguments args, without unifying: constants must be equal, constructors
-// must agree in name and arity, and a variable or an evaluated function
-// matches anything. Since it neither binds nor evaluates, it keeps every
-// fact that unification could match, whatever the types of the values.
-func mayMatchArgs(pattern, args []term.Term) bool {
+// formatFilter rejects constant facts whose bytes cannot match a narrowed
+// format. Only formats with an event-bound prefix need an entry; ordinary
+// patterns keep their term slices and allocate no additional filter tree.
+type formatFilter struct {
+	pattern *term.Function
+	prefix  []byte
+}
+
+func appendFormatFilters(filters []formatFilter, original, narrowed term.Term) []formatFilter {
+	before, ok := original.(*term.Function)
+	if !ok {
+		return filters
+	}
+	after, ok := narrowed.(*term.Function)
+	if !ok || before == after || before.Name != after.Name || len(before.Args) != len(after.Args) {
+		return filters
+	}
+	if after.Name == term.CatFunctionName {
+		if prefix := formatPrefix(before, after); len(prefix) > 0 {
+			filters = append(filters, formatFilter{after, prefix})
+		}
+	} else if !after.MayEvalToConstant() {
+		for i, arg := range after.Args {
+			filters = appendFormatFilters(filters, before.Args[i], arg)
+		}
+	}
+	return filters
+}
+
+// formatPrefix encodes leading constant fields of a narrowed format. A
+// byte variable stops the prefix: an annotation may parse its short byte
+// value as an integer with a different canonical byte representation.
+// Integer and string fields parse their own canonical types. If a field
+// cannot be encoded (including a string field narrowed to bytes), keep
+// candidates that could still parse another matching type.
+// Unknown or unevaluated fields likewise leave the rest to premise matching.
+func formatPrefix(original, f *term.Function) []byte {
+	n, bound := 0, false
+	for i, arg := range f.Args {
+		field, ok := arg.(*term.Function)
+		if !ok || len(field.Args) < 1 || len(field.Args) > 2 || slices.ContainsFunc(field.Args, func(t term.Term) bool {
+			return t.GetType() != term.ConstantType
+		}) {
+			break
+		}
+		originalField, ok := original.Args[i].(*term.Function)
+		if !ok || originalField.Name != field.Name || len(originalField.Args) != len(field.Args) ||
+			field.Name == string(term.FormatByteType) && originalField.Args[0].GetType() != term.ConstantType {
+			break
+		}
+		bound = bound || slices.ContainsFunc(originalField.Args, func(t term.Term) bool {
+			return t.GetType() == term.VariableType
+		})
+		n++
+	}
+	// Unchanged literal headers supply no event-specific narrowing. Avoid
+	// encoding them and allocating a filter unless the prefix includes
+	// at least one field value or width supplied by the event.
+	if !bound {
+		return nil
+	}
+	fields := make([]*term.Function, n)
+	for i := range fields {
+		fields[i] = term.Must(term.AsFunction(f.Args[i]))
+	}
+	prefix, err := term.FormatToBytes(fields, term.NewBinding())
+	if err != nil {
+		return nil
+	}
+	return prefix
+}
+
+// mayMatchArgs checks constants, constructors and known format prefixes
+// without binding variables or evaluating any other functions.
+func mayMatchArgs(pattern, args []term.Term, formats []formatFilter) bool {
 	if len(pattern) != len(args) {
 		return false
 	}
 	for i, p := range pattern {
-		if !mayMatch(p, args[i]) {
+		if !mayMatch(p, args[i], formats) {
 			return false
 		}
 	}
 	return true
 }
 
-func mayMatch(p, t term.Term) bool {
+func mayMatch(p, t term.Term, formats []formatFilter) bool {
 	switch p := p.(type) {
 	case *term.Variable:
 		return true
 	case *term.Function:
 		if p.MayEvalToConstant() {
+			if t.GetType() != term.ConstantType {
+				return true
+			}
+			for _, filter := range formats {
+				if filter.pattern != p {
+					continue
+				}
+				value, err := term.AsBytes(t)
+				return err != nil || bytes.HasPrefix(value, filter.prefix)
+			}
 			return true
 		}
 		switch t := t.(type) {
 		case *term.Function:
-			return t.Name == p.Name && mayMatchArgs(p.Args, t.Args)
+			return t.Name == p.Name && mayMatchArgs(p.Args, t.Args, formats)
 		case *term.Variable:
 			return true
 		}
@@ -609,7 +697,41 @@ func mayMatch(p, t term.Term) bool {
 		return false
 	}
 	if t.GetType() == term.ConstantType {
-		return p.Equal(t)
+		if p.Equal(t) {
+			return true
+		}
+		// An integer field in the annotation can encode a short byte
+		// value from a premise. Its direct match yields the canonical
+		// integer, which need not have the same byte representation.
+		// Retain numerically equal candidates for the final annotation
+		// check under the original premise binding.
+		// Distinct bytes of the same length cannot encode the same
+		// integer, and longer values cannot be integers. Avoid padding
+		// or allocating conversion errors for these unequal keys.
+		if left, ok := p.(*term.Constant[[]byte]); ok {
+			if len(left.Value) > 8 {
+				return false
+			}
+			if right, ok := t.(*term.Constant[[]byte]); ok && len(left.Value) == len(right.Value) {
+				return false
+			}
+		}
+		left, leftErr := term.AsInt(p)
+		if leftErr != nil {
+			return false
+		}
+		if value, ok := t.(*term.Constant[int64]); ok {
+			return left == value.Value
+		}
+		// Another premise can bind a byte value before this fact checks
+		// it bytewise. Include strings with the same bytes even though
+		// they cannot themselves bind an integer field.
+		value, err := term.AsBytes(t)
+		if err != nil || len(value) > 8 {
+			return false
+		}
+		right, rightErr := utils.BytesToInt(value, binary.LittleEndian)
+		return rightErr == nil && left == right
 	}
 	return true
 }

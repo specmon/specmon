@@ -430,3 +430,23 @@ func TestKillProcessRejectsUnsafePIDs(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkBytesToInt(b *testing.B) {
+	for _, test := range []struct {
+		order binary.ByteOrder
+		want  int64
+	}{
+		{binary.LittleEndian, 0x04030201},
+		{binary.BigEndian, 0x01020304},
+	} {
+		b.Run(test.order.String(), func(b *testing.B) {
+			input := []byte{1, 2, 3, 4}
+			b.ReportAllocs()
+			for b.Loop() {
+				if got, err := utils.BytesToInt(input, test.order); err != nil || got != test.want {
+					b.Fatalf("BytesToInt = %d, %v; want %d", got, err, test.want)
+				}
+			}
+		})
+	}
+}
