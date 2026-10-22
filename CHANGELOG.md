@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.4.0](https://github.com/specmon/specmon/compare/v0.3.0...v0.4.0) (2026-10-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **rule:** Macros now expand in trigger and hint annotations. Rename literal event functions or constructors that share a macro name to preserve their previous meaning.
+* **monitor:** Premise variables keep their facts' values and types. A byte-equal event value no longer replaces them. A string field rejects a byte-valued premise variable.
+* **monitor:** A failed evaluation or restriction ends only its branch. An event that no branch survives is a monitor violation with recorded reasons, so the violation hook and PID termination apply.
+* **monitor:** Loading rejects Eq or Neq restrictions without two operands, evaluable functions or cat fields with invalid arities, variables that matching cannot bind, premises that cannot be parsed on their own, and PPEvent actions whose argument is not a pair.
+* **parser:** Macro heads must be function calls whose parameters are distinct variables. Constant, nested or repeated parameters are rejected.
+* **rule:** Models whose distinct source-rule names generate the same state-fact name now fail loading. Rename one of the reported rules.
+* **monitor:** Loading rejects a model in which an epsilon rule has no linear premise, or has a premise that an epsilon step can produce: a conclusion of an epsilon rule, or of a decomposed rule whose end rule produces it.
+* **monitor:** Standalone rewriting rejects alternatives with different output sequences, including a silent alternative. Use monitor -R to keep these alternatives as separate branches.
+* **monitor:** Rewrite output must have a function call whose outer name is not a documented built-in. Models that emit such built-ins now fail loading or output processing.
+* **term:** Invalid ground cat, and, or, xor or not expressions are evaluation errors. The names xor and not are reserved for the built-in operations.
+* **term:** Integers are int64: out-of-range literals are parse errors, int fields are unsigned, and an int field without a width takes eight bytes, including as the last field of a cat. JSON constants keep their kind; legacy numbers with a fraction or exponent are rejected. Addition requires non-negative integers and fails on overflow.
+* **cmd:** A monitor violation now prints the statistics on stdout and ends with "Error: monitor violation at event N: no applicable rule found <event>" instead of a fatal log line; `specmon rewrite` names the rejected event the same way. SIGINT and SIGTERM print "signal received, exiting" and exit with status 0, and a second signal ends SpecMon at once.
+
+### Features
+
+* **build:** Stamp the git revision into the version output ([#84](https://github.com/specmon/specmon/issues/84)) ([95b9d05](https://github.com/specmon/specmon/commit/95b9d0525f468c5455df7fcef212d1ea7da67918))
+* **cmd:** Add on-violation hook ([78a8e2a](https://github.com/specmon/specmon/commit/78a8e2a9a9af6969422b5627fa64b1a774f1fb22))
+* **cmd:** Report the reasons of failed rule candidates with a violation ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **cmd:** Terminate a given PID after a monitor violation ([78a8e2a](https://github.com/specmon/specmon/commit/78a8e2a9a9af6969422b5627fa64b1a774f1fb22))
+* **monitor:** Label the allowed events of a pipeline rejection by side ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **rule:** Drop unused RHS facts and preserve computations ([#80](https://github.com/specmon/specmon/issues/80)) ([7fd7539](https://github.com/specmon/specmon/commit/7fd7539e488ad8c192df91a81766417a301b279b))
+* **term:** Add xor and not and check built-in evaluation ([#85](https://github.com/specmon/specmon/issues/85)) ([076c3fd](https://github.com/specmon/specmon/commit/076c3fd1c9b3d1c042bee864bdbdfcac944a6fe3))
+
+
+### Bug Fixes
+
+* **monitor:** Bind premise variables from their facts ([#100](https://github.com/specmon/specmon/issues/100)) ([6d0ddb4](https://github.com/specmon/specmon/commit/6d0ddb46ae7197c63cb7256218b580bf76951feb))
+* **monitor:** Check arities and variable binding on load ([#98](https://github.com/specmon/specmon/issues/98)) ([7f6d84b](https://github.com/specmon/specmon/commit/7f6d84b4fbbb379e2da9937f6001487ecc1f179f))
+* **monitor:** Complete multi-trigger desugaring semantics ([#86](https://github.com/specmon/specmon/issues/86)) ([27a9c18](https://github.com/specmon/specmon/commit/27a9c18e7b66ecaa5222217d17619e8feb48cf3a))
+* **monitor:** Explore every hint alternative ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **monitor:** Give each applicable epsilon rule its own successor ([#92](https://github.com/specmon/specmon/issues/92)) ([178fe90](https://github.com/specmon/specmon/commit/178fe9058ab49151fcef0e6d8b4ff72f8c5140ef))
+* **monitor:** Keep rewrite branches paired with their core states ([#87](https://github.com/specmon/specmon/issues/87)) ([6e3ccc4](https://github.com/specmon/specmon/commit/6e3ccc46f9ad6b7c234f5d0689ffb2a2c8579c18))
+* **monitor:** Keep rule candidate failures local to their branch ([#99](https://github.com/specmon/specmon/issues/99)) ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **monitor:** Narrow formatted premise candidates safely ([#104](https://github.com/specmon/specmon/issues/104)) ([d40ab10](https://github.com/specmon/specmon/commit/d40ab10016cfab928efa44b87e7999b22c444234))
+* **monitor:** Preserve epsilon action representations ([178fe90](https://github.com/specmon/specmon/commit/178fe9058ab49151fcef0e6d8b4ff72f8c5140ef))
+* **monitor:** Recompute continuations for each hint binding ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **monitor:** Reject ambiguous and invalid rewrite output ([#91](https://github.com/specmon/specmon/issues/91)) ([6be1e4e](https://github.com/specmon/specmon/commit/6be1e4ee0077153778e988166da123f33fa370c2))
+* **monitor:** Reject built-in names on emitted event calls ([6be1e4e](https://github.com/specmon/specmon/commit/6be1e4ee0077153778e988166da123f33fa370c2))
+* **monitor:** Reject premises that cannot be parsed on their own ([7f6d84b](https://github.com/specmon/specmon/commit/7f6d84b4fbbb379e2da9937f6001487ecc1f179f))
+* **monitor:** Store persistent facts once and count linear copies ([#97](https://github.com/specmon/specmon/issues/97)) ([377073b](https://github.com/specmon/specmon/commit/377073b3cdfd5cb1b3715fd88f5729a6fea34100))
+* **monitor:** Try configurations in the order of their hashes ([a5d775f](https://github.com/specmon/specmon/commit/a5d775f135986f6974e6beaf5405b8d0f58f31b0))
+* **parser:** Expand macros by parameter substitution ([#95](https://github.com/specmon/specmon/issues/95)) ([d17fede](https://github.com/specmon/specmon/commit/d17fede0e43142ac679b497cb41880a53267eaf8))
+* **rule:** Carry public variables through split-rule chains ([#90](https://github.com/specmon/specmon/issues/90)) ([e571f5f](https://github.com/specmon/specmon/commit/e571f5f6f253d7f219c3be07924f8e2f7c791848))
+* **rule:** Expand macros in trigger and hint annotations ([#101](https://github.com/specmon/specmon/issues/101)) ([a3cac57](https://github.com/specmon/specmon/commit/a3cac5782bc80ceb9d79bee707cb9a991a1352da))
+* **rule:** Fuse eligible translation boundaries ([#93](https://github.com/specmon/specmon/issues/93)) ([c112e33](https://github.com/specmon/specmon/commit/c112e33ee81e0ba3a08667b259094226bcdffe0f))
+* **rule:** Include persistence kind in fact equality ([377073b](https://github.com/specmon/specmon/commit/377073b3cdfd5cb1b3715fd88f5729a6fea34100))
+* **rule:** Keep generated split states distinct ([#94](https://github.com/specmon/specmon/issues/94)) ([2d957cd](https://github.com/specmon/specmon/commit/2d957cd23d09b737b92a41e84d5a7824a896cccf))
+* **rule:** Keep the source rule unchanged in the end rule ([c112e33](https://github.com/specmon/specmon/commit/c112e33ee81e0ba3a08667b259094226bcdffe0f))
+* **rule:** Match start rules only to their own generated rules ([c112e33](https://github.com/specmon/specmon/commit/c112e33ee81e0ba3a08667b259094226bcdffe0f))
+* **term:** Keep bindings consistent across arguments ([#96](https://github.com/specmon/specmon/issues/96)) ([568dd94](https://github.com/specmon/specmon/commit/568dd945f7a8ff5fca8385c2fcccf8ab2cc27cd2))
+* **term:** Use exact int64 integers and JSON constant kinds ([#83](https://github.com/specmon/specmon/issues/83)) ([0a076ac](https://github.com/specmon/specmon/commit/0a076ac315feb12d0c541c540159849387fe1b09))
+
+
+### Performance Improvements
+
+* **cmd:** Buffer consumed-event output ([6e3ccc4](https://github.com/specmon/specmon/commit/6e3ccc46f9ad6b7c234f5d0689ffb2a2c8579c18))
+* **monitor:** Prefilter large fact buckets by constant arguments ([#89](https://github.com/specmon/specmon/issues/89)) ([d7f8d30](https://github.com/specmon/specmon/commit/d7f8d306708f86f7c7fe8674d5d6d48fd691c0bb))
+* **monitor:** Reduce rewrite pipeline overhead ([6e3ccc4](https://github.com/specmon/specmon/commit/6e3ccc46f9ad6b7c234f5d0689ffb2a2c8579c18))
+
 ## [0.3.0](https://github.com/specmon/specmon/compare/v0.2.0...v0.3.0) (2026-09-27)
 
 
